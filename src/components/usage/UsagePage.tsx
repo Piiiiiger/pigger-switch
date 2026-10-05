@@ -1,39 +1,29 @@
 import { useSettings } from "@/hooks/useSettings";
-import type { SettingsFormState } from "@/hooks/useSettings";
-import type { AppTypeFilter } from "@/types/usage";
 import { UsageDashboard } from "./UsageDashboard";
 
 interface UsagePageProps {
-  /** 从应用页「查看此应用的用量」进入时带上的应用筛选 */
-  initialAppType?: AppTypeFilter;
-  /** 打开设置 → 本地路由（「记录请求用量」开关在那里） */
-  onOpenRoutingSettings?: () => void;
+  /** 点额度条打开订阅额度页 */
+  onOpenLimits?: () => void;
+  /** 打开设置（数据来源里「修改日志目录」） */
+  onOpenSettings?: () => void;
 }
 
-/** 侧栏「用量统计」全局页（v7 S6）：不开路由也有数据（读会话日志）。 */
-export function UsagePage({
-  initialAppType,
-  onOpenRoutingSettings,
-}: UsagePageProps = {}) {
-  const { settings, updateSettings, autoSaveSettings } = useSettings();
-
-  const save = (updates: Partial<SettingsFormState>) => {
-    updateSettings(updates);
-    void autoSaveSettings(updates).catch(() => undefined);
-  };
+/** 用量统计页：读 Claude Code / Codex 的会话日志，不需要任何代理。 */
+export function UsagePage({ onOpenLimits, onOpenSettings }: UsagePageProps) {
+  const { settings, update } = useSettings();
 
   return (
     <UsageDashboard
-      refreshIntervalMs={settings?.usageDashboardRefreshIntervalMs}
+      refreshIntervalMs={settings?.usageDashboardRefreshIntervalMs ?? undefined}
       onRefreshIntervalChange={(usageDashboardRefreshIntervalMs) =>
-        save({ usageDashboardRefreshIntervalMs })
+        update({ usageDashboardRefreshIntervalMs }).then(() => true)
       }
       sessionAutoSyncEnabled={settings?.sessionAutoSyncEnabled ?? true}
       onSessionAutoSyncEnabledChange={(sessionAutoSyncEnabled) =>
-        save({ sessionAutoSyncEnabled })
+        update({ sessionAutoSyncEnabled }).then(() => true)
       }
-      initialAppType={initialAppType}
-      onOpenRoutingSettings={onOpenRoutingSettings}
+      onOpenLimits={onOpenLimits}
+      onOpenSettings={onOpenSettings}
     />
   );
 }

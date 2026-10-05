@@ -27,203 +27,116 @@ type RequestLogsQueryArgs = {
   options?: UsageQueryOptions;
 };
 
-type RequestLogsKey = {
-  preset: UsageRangeSelection["preset"];
-  customStartDate?: number;
-  customEndDate?: number;
-  liveEndTime?: boolean;
-  appType?: string;
-  providerName?: string;
-  model?: string;
-  statusCode?: number;
-};
+/** 时间范围 + 筛选的查询键片段（所有统计查询共用） */
+function scopeKey(range: UsageRangeSelection, filters?: UsageScopeFilters) {
+  return [
+    range.preset,
+    range.customStartDate ?? 0,
+    range.customEndDate ?? 0,
+    range.liveEndTime ?? false,
+    filters?.appType ?? null,
+    filters?.project ?? null,
+    filters?.model ?? null,
+  ] as const;
+}
 
 // Query keys
 export const usageKeys = {
   all: ["usage"] as const,
-  summary: (
-    preset: UsageRangeSelection["preset"],
-    customStartDate: number | undefined,
-    customEndDate: number | undefined,
+  scoped: (
+    kind: string,
+    range: UsageRangeSelection,
     filters?: UsageScopeFilters,
-    liveEndTime?: boolean,
+  ) => [...usageKeys.all, kind, ...scopeKey(range, filters)] as const,
+  logs: (
+    range: UsageRangeSelection,
+    filters: LogFilters,
+    page: number,
+    pageSize: number,
   ) =>
-    [
-      ...usageKeys.all,
-      "summary",
-      preset,
-      customStartDate ?? 0,
-      customEndDate ?? 0,
-      liveEndTime ?? false,
-      filters?.appType ?? null,
-      filters?.providerName ?? null,
-      filters?.model ?? null,
-    ] as const,
-  summaryByApp: (
-    preset: UsageRangeSelection["preset"],
-    customStartDate: number | undefined,
-    customEndDate: number | undefined,
-    filters?: Pick<UsageScopeFilters, "providerName" | "model">,
-    liveEndTime?: boolean,
-  ) =>
-    [
-      ...usageKeys.all,
-      "summary-by-app",
-      preset,
-      customStartDate ?? 0,
-      customEndDate ?? 0,
-      liveEndTime ?? false,
-      filters?.providerName ?? null,
-      filters?.model ?? null,
-    ] as const,
-  trends: (
-    preset: UsageRangeSelection["preset"],
-    customStartDate: number | undefined,
-    customEndDate: number | undefined,
-    filters?: UsageScopeFilters,
-    liveEndTime?: boolean,
-  ) =>
-    [
-      ...usageKeys.all,
-      "trends",
-      preset,
-      customStartDate ?? 0,
-      customEndDate ?? 0,
-      liveEndTime ?? false,
-      filters?.appType ?? null,
-      filters?.providerName ?? null,
-      filters?.model ?? null,
-    ] as const,
-  providerStats: (
-    preset: UsageRangeSelection["preset"],
-    customStartDate: number | undefined,
-    customEndDate: number | undefined,
-    filters?: UsageScopeFilters,
-    liveEndTime?: boolean,
-  ) =>
-    [
-      ...usageKeys.all,
-      "provider-stats",
-      preset,
-      customStartDate ?? 0,
-      customEndDate ?? 0,
-      liveEndTime ?? false,
-      filters?.appType ?? null,
-      filters?.providerName ?? null,
-      filters?.model ?? null,
-    ] as const,
-  modelStats: (
-    preset: UsageRangeSelection["preset"],
-    customStartDate: number | undefined,
-    customEndDate: number | undefined,
-    filters?: UsageScopeFilters,
-    liveEndTime?: boolean,
-  ) =>
-    [
-      ...usageKeys.all,
-      "model-stats",
-      preset,
-      customStartDate ?? 0,
-      customEndDate ?? 0,
-      liveEndTime ?? false,
-      filters?.appType ?? null,
-      filters?.providerName ?? null,
-      filters?.model ?? null,
-    ] as const,
-  logs: (key: RequestLogsKey, page: number, pageSize: number) =>
     [
       ...usageKeys.all,
       "logs",
-      key.preset,
-      key.customStartDate ?? 0,
-      key.customEndDate ?? 0,
-      key.liveEndTime ?? false,
-      key.appType ?? "",
-      key.providerName ?? "",
-      key.model ?? "",
-      key.statusCode ?? -1,
+      ...scopeKey(range, filters),
+      filters.sessionId ?? "",
+      filters.statusCode ?? -1,
       page,
       pageSize,
     ] as const,
   detail: (requestId: string) =>
     [...usageKeys.all, "detail", requestId] as const,
   pricing: () => [...usageKeys.all, "pricing"] as const,
-  session: (appType: string, sessionId: string) =>
-    [...usageKeys.all, "session", appType, sessionId] as const,
-  limits: (providerId: string, appType: string) =>
-    [...usageKeys.all, "limits", providerId, appType] as const,
-  script: (providerId: string, appType: string) =>
-    [...usageKeys.all, providerId, appType] as const,
+  budget: () => [...usageKeys.all, "budget"] as const,
 };
 
 /** 把 UI 侧的 "all" 哨兵归一成 undefined（后端语义：不过滤）。 */
 function normalizeScopeFilters(filters?: UsageScopeFilters): UsageScopeFilters {
   return {
     appType: filters?.appType === "all" ? undefined : filters?.appType,
-    providerName: filters?.providerName,
+    project: filters?.project,
     model: filters?.model,
   };
 }
 
-// Hooks
-// 统计类查询都带 keepPreviousData：换筛选、时间范围、翻页时先留着上一份数据，
-// 新数据到了再换，不让指标闪成「…」、请求日志表塌成骨架。
-export function useUsageSummary(
+type ScopedFetcher<T> = (
+  startDate: number | undefined,
+  endDate: number | undefined,
+  filters: UsageScopeFilters,
+) => Promise<T>;
+
+/**
+ * 统计类查询的公共形状：按时间范围 + 筛选取数。都带 keepPreviousData：换筛选、
+ * 时间范围、翻页时先留着上一份数据，新数据到了再换，不让指标闪成「…」。
+ */
+function useScopedQuery<T>(
+  kind: string,
+  fetcher: ScopedFetcher<T>,
   range: UsageRangeSelection,
   filters?: UsageScopeFilters,
-  options?: UsageQueryOptions,
+  options?: UsageQueryOptions & { enabled?: boolean },
 ) {
   const effective = normalizeScopeFilters(filters);
   return useQuery({
-    queryKey: usageKeys.summary(
-      range.preset,
-      range.customStartDate,
-      range.customEndDate,
-      effective,
-      range.liveEndTime,
-    ),
+    queryKey: usageKeys.scoped(kind, range, effective),
     queryFn: () => {
       const { startDate, endDate } = resolveUsageRange(range);
-      return usageApi.getUsageSummary(
-        startDate,
-        endDate,
-        effective.appType,
-        effective.providerName,
-        effective.model,
-      );
+      return fetcher(startDate, endDate, effective);
     },
+    enabled: options?.enabled ?? true,
     placeholderData: keepPreviousData,
     refetchInterval: options?.refetchInterval ?? DEFAULT_REFETCH_INTERVAL_MS,
     refetchIntervalInBackground: options?.refetchIntervalInBackground ?? false,
   });
 }
 
+export function useUsageSummary(
+  range: UsageRangeSelection,
+  filters?: UsageScopeFilters,
+  options?: UsageQueryOptions & { enabled?: boolean },
+) {
+  return useScopedQuery(
+    "summary",
+    (start, end, f) =>
+      usageApi.getUsageSummary(start, end, f.appType, f.project, f.model),
+    range,
+    filters,
+    options,
+  );
+}
+
 export function useUsageSummaryByApp(
   range: UsageRangeSelection,
-  filters?: Pick<UsageScopeFilters, "providerName" | "model">,
+  filters?: Pick<UsageScopeFilters, "project" | "model">,
   options?: UsageQueryOptions,
 ) {
-  return useQuery({
-    queryKey: usageKeys.summaryByApp(
-      range.preset,
-      range.customStartDate,
-      range.customEndDate,
-      filters,
-      range.liveEndTime,
-    ),
-    queryFn: () => {
-      const { startDate, endDate } = resolveUsageRange(range);
-      return usageApi.getUsageSummaryByApp(
-        startDate,
-        endDate,
-        filters?.providerName,
-        filters?.model,
-      );
-    },
-    placeholderData: keepPreviousData,
-    refetchInterval: options?.refetchInterval ?? DEFAULT_REFETCH_INTERVAL_MS,
-    refetchIntervalInBackground: options?.refetchIntervalInBackground ?? false,
-  });
+  return useScopedQuery(
+    "summary-by-app",
+    (start, end, f) =>
+      usageApi.getUsageSummaryByApp(start, end, f.project, f.model),
+    range,
+    { project: filters?.project, model: filters?.model },
+    options,
+  );
 }
 
 export function useUsageTrends(
@@ -231,59 +144,29 @@ export function useUsageTrends(
   filters?: UsageScopeFilters,
   options?: UsageQueryOptions,
 ) {
-  const effective = normalizeScopeFilters(filters);
-  return useQuery({
-    queryKey: usageKeys.trends(
-      range.preset,
-      range.customStartDate,
-      range.customEndDate,
-      effective,
-      range.liveEndTime,
-    ),
-    queryFn: () => {
-      const { startDate, endDate } = resolveUsageRange(range);
-      return usageApi.getUsageTrends(
-        startDate,
-        endDate,
-        effective.appType,
-        effective.providerName,
-        effective.model,
-      );
-    },
-    placeholderData: keepPreviousData,
-    refetchInterval: options?.refetchInterval ?? DEFAULT_REFETCH_INTERVAL_MS,
-    refetchIntervalInBackground: options?.refetchIntervalInBackground ?? false,
-  });
+  return useScopedQuery(
+    "trends",
+    (start, end, f) =>
+      usageApi.getUsageTrends(start, end, f.appType, f.project, f.model),
+    range,
+    filters,
+    options,
+  );
 }
 
-export function useProviderStats(
+export function useProjectStats(
   range: UsageRangeSelection,
   filters?: UsageScopeFilters,
   options?: UsageQueryOptions,
 ) {
-  const effective = normalizeScopeFilters(filters);
-  return useQuery({
-    queryKey: usageKeys.providerStats(
-      range.preset,
-      range.customStartDate,
-      range.customEndDate,
-      effective,
-      range.liveEndTime,
-    ),
-    queryFn: () => {
-      const { startDate, endDate } = resolveUsageRange(range);
-      return usageApi.getProviderStats(
-        startDate,
-        endDate,
-        effective.appType,
-        effective.providerName,
-        effective.model,
-      );
-    },
-    placeholderData: keepPreviousData,
-    refetchInterval: options?.refetchInterval ?? DEFAULT_REFETCH_INTERVAL_MS,
-    refetchIntervalInBackground: options?.refetchIntervalInBackground ?? false,
-  });
+  return useScopedQuery(
+    "project-stats",
+    (start, end, f) =>
+      usageApi.getProjectStats(start, end, f.appType, f.project, f.model),
+    range,
+    filters,
+    options,
+  );
 }
 
 export function useModelStats(
@@ -291,28 +174,52 @@ export function useModelStats(
   filters?: UsageScopeFilters,
   options?: UsageQueryOptions,
 ) {
-  const effective = normalizeScopeFilters(filters);
+  return useScopedQuery(
+    "model-stats",
+    (start, end, f) =>
+      usageApi.getModelStats(start, end, f.appType, f.project, f.model),
+    range,
+    filters,
+    options,
+  );
+}
+
+export function useSessionStats(
+  range: UsageRangeSelection,
+  filters?: UsageScopeFilters,
+  options?: UsageQueryOptions,
+) {
+  return useScopedQuery(
+    "session-stats",
+    (start, end, f) =>
+      usageApi.getSessionStats(start, end, f.appType, f.project, f.model, 300),
+    range,
+    filters,
+    options,
+  );
+}
+
+export function useHourlyActivity(
+  range: UsageRangeSelection,
+  filters?: UsageScopeFilters,
+  options?: UsageQueryOptions,
+) {
+  return useScopedQuery(
+    "hourly-activity",
+    (start, end, f) =>
+      usageApi.getHourlyActivity(start, end, f.appType, f.project, f.model),
+    range,
+    filters,
+    options,
+  );
+}
+
+export function useBudgetStatus(options?: UsageQueryOptions) {
   return useQuery({
-    queryKey: usageKeys.modelStats(
-      range.preset,
-      range.customStartDate,
-      range.customEndDate,
-      effective,
-      range.liveEndTime,
-    ),
-    queryFn: () => {
-      const { startDate, endDate } = resolveUsageRange(range);
-      return usageApi.getModelStats(
-        startDate,
-        endDate,
-        effective.appType,
-        effective.providerName,
-        effective.model,
-      );
-    },
-    placeholderData: keepPreviousData,
+    queryKey: usageKeys.budget(),
+    queryFn: () => usageApi.getBudgetStatus(),
     refetchInterval: options?.refetchInterval ?? DEFAULT_REFETCH_INTERVAL_MS,
-    refetchIntervalInBackground: options?.refetchIntervalInBackground ?? false,
+    refetchIntervalInBackground: false,
   });
 }
 
@@ -323,25 +230,14 @@ export function useRequestLogs({
   pageSize = 20,
   options,
 }: RequestLogsQueryArgs) {
-  const key: RequestLogsKey = {
-    preset: range.preset,
-    customStartDate: range.customStartDate,
-    customEndDate: range.customEndDate,
-    liveEndTime: range.liveEndTime,
-    appType: filters.appType,
-    providerName: filters.providerName,
-    model: filters.model,
-    statusCode: filters.statusCode,
-  };
-
   return useQuery({
-    queryKey: usageKeys.logs(key, page, pageSize),
+    queryKey: usageKeys.logs(range, filters, page, pageSize),
     queryFn: () => {
       const effectiveFilters = { ...filters, ...resolveUsageRange(range) };
       return usageApi.getRequestLogs(effectiveFilters, page, pageSize);
     },
     placeholderData: keepPreviousData,
-    refetchInterval: options?.refetchInterval ?? DEFAULT_REFETCH_INTERVAL_MS, // 每30秒自动刷新
+    refetchInterval: options?.refetchInterval ?? DEFAULT_REFETCH_INTERVAL_MS,
     refetchIntervalInBackground: options?.refetchIntervalInBackground ?? false,
   });
 }
@@ -367,28 +263,10 @@ export function useSessionUsageLastSync() {
   });
 }
 
-/** 单个会话的用量汇总（会话阅读页头部），只数会话日志导入的行。 */
-export function useSessionUsageSummary(appType: string, sessionId: string) {
-  return useQuery({
-    queryKey: usageKeys.session(appType, sessionId),
-    queryFn: () => usageApi.getSessionUsageSummary(appType, sessionId),
-    refetchInterval: DEFAULT_REFETCH_INTERVAL_MS,
-    refetchIntervalInBackground: false,
-  });
-}
-
 export function useModelPricing() {
   return useQuery({
     queryKey: usageKeys.pricing(),
     queryFn: usageApi.getModelPricing,
-  });
-}
-
-export function useProviderLimits(providerId: string, appType: string) {
-  return useQuery({
-    queryKey: usageKeys.limits(providerId, appType),
-    queryFn: () => usageApi.checkProviderLimits(providerId, appType),
-    enabled: !!providerId && !!appType,
   });
 }
 

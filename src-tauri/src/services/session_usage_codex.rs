@@ -13,11 +13,9 @@
 //! - `turn_context` → 提取当前 model
 //! - `event_msg` (type=token_count) → 提取累计 token 用量，计算 delta
 
-use crate::codex_config::get_codex_config_dir;
+use crate::config::get_codex_config_dir;
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
-use crate::proxy::usage::calculator::{CostCalculator, ModelPricing};
-use crate::proxy::usage::parser::TokenUsage;
 use crate::services::session_usage::{
     estimated_latency_ms, metadata_modified_nanos, parse_timestamp_millis, update_sync_state,
     update_sync_state_on_conn, SessionSyncResult,
@@ -25,6 +23,8 @@ use crate::services::session_usage::{
 use crate::services::usage_stats::{
     find_model_pricing, has_suspected_codex_session_duplicate, should_skip_session_insert, DedupKey,
 };
+use crate::usage::calculator::{CostCalculator, ModelPricing};
+use crate::usage::parser::TokenUsage;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use std::collections::HashMap;
@@ -406,6 +406,8 @@ struct ParsedCodexFile {
     /// root `session_meta` 的线程 ID（稳定逻辑线程）：单段文件名与文件名
     /// UUID 一致，revert/resume 的双段文件名对应前置 UUID。
     meta_thread_id: Option<String>,
+    /// root `session_meta` 里的工作目录，记作项目
+    meta_cwd: Option<String>,
     root_meta_seen: bool,
     root_timestamp: Option<DateTime<Utc>>,
     parent: ParentResolution,
@@ -997,6 +999,7 @@ fn parse_codex_file(
     let mut root_meta_seen = false;
     let mut root_timestamp = None;
     let mut meta_thread_id = None;
+    let mut meta_cwd = None;
     let mut parent = ParentResolution::None;
     let mut current_model = "unknown".to_string();
     // `total_token_usage` is session-cumulative, including across model and
@@ -1069,6 +1072,7 @@ fn parse_codex_file(
                 root_timestamp = parse_timestamp(value.get("timestamp"));
                 let payload = value.get("payload").unwrap_or(&serde_json::Value::Null);
                 parent = explicit_parent_from_meta(payload);
+                meta_cwd = non_empty_string(payload.get("cwd"));
 
                 meta_thread_id = non_empty_string(
                     payload
@@ -1233,6 +1237,7 @@ fn parse_codex_file(
     Ok(ParsedCodexFile {
         root_thread_id,
         meta_thread_id,
+        meta_cwd,
         root_meta_seen,
         root_timestamp,
         parent,
@@ -1633,6 +1638,7 @@ fn sync_single_codex_file(
                 &event.delta,
                 &event.model,
                 Some(session_thread_id),
+                parsed.meta_cwd.as_deref(),
                 event.timestamp.as_deref(),
                 event.latency_ms,
                 &mut batch_suspected,
@@ -1684,6 +1690,7 @@ fn insert_codex_session_entry(
         delta,
         model,
         session_id,
+        None,
         timestamp,
         None,
         suspected_duplicates,
@@ -1704,6 +1711,7 @@ fn insert_codex_session_entry_on_conn(
     delta: &DeltaTokens,
     model: &str,
     session_id: Option<&str>,
+    project: Option<&str>,
     timestamp: Option<&str>,
     latency_ms: Option<i64>,
     suspected_duplicates: &mut u32,
@@ -1750,8 +1758,6 @@ fn insert_codex_session_entry_on_conn(
         output_tokens: delta.output,
         cache_read_tokens: delta.cached_input,
         cache_creation_tokens: 0,
-        model: Some(model.to_string()),
-        message_id: None,
     };
 
     let pricing = pricing_cache
@@ -1786,8 +1792,8 @@ fn insert_codex_session_entry_on_conn(
             input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
             input_cost_usd, output_cost_usd, cache_read_cost_usd, cache_creation_cost_usd, total_cost_usd,
             latency_ms, first_token_ms, status_code, error_message, session_id,
-            provider_type, is_streaming, cost_multiplier, created_at, data_source
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
+            provider_type, is_streaming, cost_multiplier, created_at, data_source, project
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
         )
         .and_then(|mut stmt| stmt.execute(rusqlite::params![
                 request_id,
@@ -1814,6 +1820,7 @@ fn insert_codex_session_entry_on_conn(
                 "1.0",               // cost_multiplier
                 created_at,
                 "codex_session",     // data_source
+                project.unwrap_or(""),
             ]))
         .map_err(|e| AppError::Database(format!("插入 Codex 会话日志失败: {e}")))?;
 
@@ -3672,8 +3679,8 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(&real_sessions, temp.path().join(".codex").join("sessions"))
             .expect("symlink sessions");
-        let previous_home = std::env::var_os("CC_SWITCH_TEST_HOME");
-        std::env::set_var("CC_SWITCH_TEST_HOME", temp.path());
+        let previous_home = std::env::var_os("PIGGER_SWITCH_TEST_HOME");
+        std::env::set_var("PIGGER_SWITCH_TEST_HOME", temp.path());
 
         clear_codex_replay_caches();
         // CODEX_REPLAY_DISK=1 时用临时 HOME 下的磁盘库：逐行 autocommit 的
@@ -3749,8 +3756,8 @@ mod tests {
         }
 
         match previous_home {
-            Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
-            None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+            Some(value) => std::env::set_var("PIGGER_SWITCH_TEST_HOME", value),
+            None => std::env::remove_var("PIGGER_SWITCH_TEST_HOME"),
         }
         Ok(())
     }

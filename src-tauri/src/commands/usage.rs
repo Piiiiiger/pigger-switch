@@ -26,7 +26,7 @@ pub async fn get_usage_summary(
     start_date: Option<i64>,
     end_date: Option<i64>,
     app_type: Option<String>,
-    provider_name: Option<String>,
+    project: Option<String>,
     model: Option<String>,
 ) -> Result<UsageSummary, AppError> {
     run_db_query(&state, move |db| {
@@ -34,7 +34,7 @@ pub async fn get_usage_summary(
             start_date,
             end_date,
             app_type.as_deref(),
-            provider_name.as_deref(),
+            project.as_deref(),
             model.as_deref(),
         )
     })
@@ -60,16 +60,11 @@ pub async fn get_usage_summary_by_app(
     state: State<'_, AppState>,
     start_date: Option<i64>,
     end_date: Option<i64>,
-    provider_name: Option<String>,
+    project: Option<String>,
     model: Option<String>,
 ) -> Result<Vec<UsageSummaryByApp>, AppError> {
     run_db_query(&state, move |db| {
-        db.get_usage_summary_by_app(
-            start_date,
-            end_date,
-            provider_name.as_deref(),
-            model.as_deref(),
-        )
+        db.get_usage_summary_by_app(start_date, end_date, project.as_deref(), model.as_deref())
     })
     .await
 }
@@ -81,7 +76,7 @@ pub async fn get_usage_trends(
     start_date: Option<i64>,
     end_date: Option<i64>,
     app_type: Option<String>,
-    provider_name: Option<String>,
+    project: Option<String>,
     model: Option<String>,
 ) -> Result<Vec<DailyStats>, AppError> {
     run_db_query(&state, move |db| {
@@ -89,29 +84,29 @@ pub async fn get_usage_trends(
             start_date,
             end_date,
             app_type.as_deref(),
-            provider_name.as_deref(),
+            project.as_deref(),
             model.as_deref(),
         )
     })
     .await
 }
 
-/// 获取 Provider 统计
+/// 获取项目统计
 #[tauri::command]
-pub async fn get_provider_stats(
+pub async fn get_project_stats(
     state: State<'_, AppState>,
     start_date: Option<i64>,
     end_date: Option<i64>,
     app_type: Option<String>,
-    provider_name: Option<String>,
+    project: Option<String>,
     model: Option<String>,
-) -> Result<Vec<ProviderStats>, AppError> {
+) -> Result<Vec<ProjectStats>, AppError> {
     run_db_query(&state, move |db| {
-        db.get_provider_stats(
+        db.get_project_stats(
             start_date,
             end_date,
             app_type.as_deref(),
-            provider_name.as_deref(),
+            project.as_deref(),
             model.as_deref(),
         )
     })
@@ -125,7 +120,7 @@ pub async fn get_model_stats(
     start_date: Option<i64>,
     end_date: Option<i64>,
     app_type: Option<String>,
-    provider_name: Option<String>,
+    project: Option<String>,
     model: Option<String>,
 ) -> Result<Vec<ModelStats>, AppError> {
     run_db_query(&state, move |db| {
@@ -133,11 +128,65 @@ pub async fn get_model_stats(
             start_date,
             end_date,
             app_type.as_deref(),
-            provider_name.as_deref(),
+            project.as_deref(),
             model.as_deref(),
         )
     })
     .await
+}
+
+/// 按会话汇总（会话页）
+#[tauri::command]
+pub async fn get_session_stats(
+    state: State<'_, AppState>,
+    start_date: Option<i64>,
+    end_date: Option<i64>,
+    app_type: Option<String>,
+    project: Option<String>,
+    model: Option<String>,
+    limit: Option<u32>,
+) -> Result<Vec<SessionStats>, AppError> {
+    run_db_query(&state, move |db| {
+        db.get_session_stats(
+            start_date,
+            end_date,
+            app_type.as_deref(),
+            project.as_deref(),
+            model.as_deref(),
+            limit.unwrap_or(200).clamp(1, 1000),
+        )
+    })
+    .await
+}
+
+/// 按「星期 × 小时」汇总活动量
+#[tauri::command]
+pub async fn get_hourly_activity(
+    state: State<'_, AppState>,
+    start_date: Option<i64>,
+    end_date: Option<i64>,
+    app_type: Option<String>,
+    project: Option<String>,
+    model: Option<String>,
+) -> Result<Vec<HourlyActivity>, AppError> {
+    run_db_query(&state, move |db| {
+        db.get_hourly_activity(
+            start_date,
+            end_date,
+            app_type.as_deref(),
+            project.as_deref(),
+            model.as_deref(),
+        )
+    })
+    .await
+}
+
+/// 今天 / 本月的花费和预算
+#[tauri::command]
+pub async fn get_budget_status(
+    state: State<'_, AppState>,
+) -> Result<crate::services::alerts::BudgetStatus, AppError> {
+    run_db_query(&state, crate::services::alerts::budget_status).await
 }
 
 /// 获取请求日志列表
@@ -270,16 +319,6 @@ pub fn record_models_dev_sync_result(
     error: Option<String>,
 ) -> Result<(), AppError> {
     crate::services::model_pricing::record_models_dev_sync_result(&state.db, synced_at, error)
-}
-
-/// 检查 Provider 使用限额
-#[tauri::command]
-pub fn check_provider_limits(
-    state: State<'_, AppState>,
-    provider_id: String,
-    app_type: String,
-) -> Result<crate::services::usage_stats::ProviderLimitStatus, AppError> {
-    state.db.check_provider_limits(&provider_id, &app_type)
 }
 
 /// 删除模型定价

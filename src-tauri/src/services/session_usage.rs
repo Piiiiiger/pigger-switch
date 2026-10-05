@@ -11,11 +11,11 @@
 use crate::config::get_claude_config_dir;
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
-use crate::proxy::usage::calculator::{CostCalculator, ModelPricing};
-use crate::proxy::usage::parser::TokenUsage;
 use crate::services::usage_stats::{
     effective_usage_log_filter, find_model_pricing, has_matching_proxy_usage_log, DedupKey,
 };
+use crate::usage::calculator::{CostCalculator, ModelPricing};
+use crate::usage::parser::TokenUsage;
 use rusqlite::OptionalExtension;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -77,8 +77,7 @@ pub fn last_sync_completed_at() -> Option<i64> {
 ///
 /// 各解析器在一轮扫描开头用 [`load_sync_cursors`] 一次性预取全表，替代
 /// 逐文件的单行查询（文件数随历史只增不减，逐文件查询意味着每轮上千次
-/// 取锁）。`last_synced_at` 对 Pi 路径是编码后的 revision，其余路径是
-/// 真实同步时间戳。
+/// 取锁）。
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct SyncCursor {
     pub last_modified: i64,
@@ -87,7 +86,6 @@ pub(crate) struct SyncCursor {
     /// 游标边界前尾部字节的指纹（仅 Claude 路径写入），用于识别文件被
     /// 外部重写；NULL 表示无指纹可校验。
     pub last_tail_fingerprint: Option<i64>,
-    pub last_synced_at: i64,
 }
 
 /// 一次性预取 session_log_sync 全表游标。
@@ -100,7 +98,7 @@ pub(crate) fn load_sync_cursors(db: &Database) -> Result<HashMap<String, SyncCur
     let conn = lock_conn!(db.conn);
     let mut stmt = conn
         .prepare(
-            "SELECT file_path, last_modified, last_line_offset, last_synced_at, last_byte_offset,
+            "SELECT file_path, last_modified, last_line_offset, last_byte_offset,
                     last_tail_fingerprint
              FROM session_log_sync",
         )
@@ -111,9 +109,8 @@ pub(crate) fn load_sync_cursors(db: &Database) -> Result<HashMap<String, SyncCur
             SyncCursor {
                 last_modified: row.get(1)?,
                 last_line_offset: row.get(2)?,
-                last_synced_at: row.get(3)?,
-                last_byte_offset: row.get(4)?,
-                last_tail_fingerprint: row.get(5)?,
+                last_byte_offset: row.get(3)?,
+                last_tail_fingerprint: row.get(4)?,
             },
         ))
     });
@@ -141,31 +138,6 @@ pub fn sync_all_unlocked(db: &Database) -> SessionSyncResult {
         &mut result,
         "Codex",
         crate::services::session_usage_codex::sync_codex_usage(db),
-    );
-    merge_sync_step(
-        &mut result,
-        "Gemini",
-        crate::services::session_usage_gemini::sync_gemini_usage(db),
-    );
-    merge_sync_step(
-        &mut result,
-        "OpenCode",
-        crate::services::session_usage_opencode::sync_opencode_usage(db),
-    );
-    merge_sync_step(
-        &mut result,
-        "Grok Build",
-        crate::services::session_usage_grokbuild::sync_grokbuild_usage(db),
-    );
-    merge_sync_step(
-        &mut result,
-        "Pi",
-        crate::services::session_usage_pi::sync_pi_usage(db),
-    );
-    merge_sync_step(
-        &mut result,
-        "MCode",
-        crate::services::session_usage_mcode::sync_mcode_usage(db),
     );
     notify_sync_result(&result);
     record_sync_completed(chrono::Utc::now().timestamp_millis());
@@ -199,6 +171,8 @@ struct ParsedAssistantUsage {
     stop_reason: Option<String>,
     timestamp: Option<String>,
     session_id: Option<String>,
+    /// 这一行的工作目录（Claude Code 每条 assistant 行都带 `cwd`）
+    project: Option<String>,
 }
 
 /// 估算出的请求耗时短于这个毫秒数就不要：真实请求不可能这么快，多半是起点取错了。
@@ -689,6 +663,8 @@ fn sync_single_file(
     let mut read_error: Option<String> = None;
     let mut messages: HashMap<String, ParsedAssistantUsage> = HashMap::new();
     let mut current_session_id: Option<String> = None;
+    // Claude Code 给会话起的标题（`ai-title` 行，后写的覆盖先写的）
+    let mut session_titles: HashMap<String, String> = HashMap::new();
 
     loop {
         buf.clear();
@@ -728,6 +704,15 @@ fn sync_single_file(
 
         // 每一行都记进对话链，估算请求耗时时沿它找起点
         record_chain_node(&mut chain, &value);
+
+        if value.get("type").and_then(|t| t.as_str()) == Some("ai-title") {
+            let session = value.get("sessionId").and_then(|v| v.as_str());
+            let title = value.get("aiTitle").and_then(|v| v.as_str()).map(str::trim);
+            if let (Some(session), Some(title)) = (session, title.filter(|t| !t.is_empty())) {
+                session_titles.insert(session.to_string(), title.to_string());
+            }
+            continue;
+        }
 
         // 只处理 assistant 类型的消息
         if value.get("type").and_then(|t| t.as_str()) != Some("assistant") {
@@ -783,6 +768,11 @@ fn sync_single_file(
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
             session_id: current_session_id.clone(),
+            project: value
+                .get("cwd")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string()),
         };
 
         // 按 message.id 去重：优先保留有 stop_reason 的条目，否则保留最新的
@@ -804,6 +794,14 @@ fn sync_single_file(
 
         if should_replace {
             messages.insert(msg_id, parsed);
+        }
+    }
+
+    // 项目 = 会话启动时所在的目录。行里的 cwd 会跟着 agent 的 cd 变，
+    // 拿它分组会把一个会话拆进好几个目录，所以统一换成会话文件开头的那个。
+    if let Some(root) = session_root_cwd(file_path) {
+        for msg in messages.values_mut() {
+            msg.project = Some(root.clone());
         }
     }
 
@@ -840,7 +838,7 @@ fn sync_single_file(
 
         let request_id = format!(
             "{}{}",
-            crate::proxy::usage::parser::SESSION_REQUEST_ID_PREFIX,
+            crate::usage::parser::SESSION_REQUEST_ID_PREFIX,
             msg.message_id
         );
 
@@ -862,6 +860,12 @@ fn sync_single_file(
                 log::warn!("[SESSION-SYNC] 插入失败 ({}): {e}", msg.message_id);
                 skipped += 1;
             }
+        }
+    }
+
+    for (session_id, title) in &session_titles {
+        if let Err(e) = upsert_session_title_on_conn(&tx, "claude", session_id, title) {
+            log::warn!("[SESSION-SYNC] 写入会话标题失败 ({session_id}): {e}");
         }
     }
 
@@ -893,6 +897,63 @@ fn sync_single_file(
         read_error,
         pinned_rewrite: None,
     })
+}
+
+/// 会话启动时的工作目录：会话文件里第一个带 `cwd` 的行。子 agent 的文件
+/// （`项目/SESSION_ID/subagents/…/*.jsonl`）算在父会话名下，读父会话文件
+/// `项目/SESSION_ID.jsonl`；父文件不在时退回读自己。只读文件开头一小段。
+fn session_root_cwd(file_path: &Path) -> Option<String> {
+    let parent_session_file = file_path.ancestors().find_map(|dir| {
+        (dir.file_name()? == "subagents").then(|| {
+            let session_dir = dir.parent()?;
+            let name = session_dir.file_name()?.to_str()?;
+            Some(session_dir.with_file_name(format!("{name}.jsonl")))
+        })?
+    });
+    let source = parent_session_file
+        .filter(|p| p.is_file())
+        .unwrap_or_else(|| file_path.to_path_buf());
+    first_cwd_in_file(&source)
+}
+
+/// 最多看文件开头这么多行找 `cwd`
+const ROOT_CWD_MAX_LINES: usize = 200;
+
+fn first_cwd_in_file(path: &Path) -> Option<String> {
+    let reader = BufReader::new(fs::File::open(path).ok()?);
+    for line in reader.split(b'\n').take(ROOT_CWD_MAX_LINES) {
+        let line = line.ok()?;
+        // 先粗筛，不是每行都值得解析
+        if !line.windows(6).any(|w| w == b"\"cwd\":") {
+            continue;
+        }
+        let value: serde_json::Value = match serde_json::from_slice(&line) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if let Some(cwd) = value.get("cwd").and_then(|v| v.as_str()) {
+            if !cwd.is_empty() {
+                return Some(cwd.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// 记下会话标题（会话页展示用）。
+pub(crate) fn upsert_session_title_on_conn(
+    conn: &rusqlite::Connection,
+    app_type: &str,
+    session_id: &str,
+    title: &str,
+) -> Result<(), AppError> {
+    conn.prepare_cached(
+        "INSERT INTO session_titles (app_type, session_id, title) VALUES (?1, ?2, ?3)
+         ON CONFLICT(app_type, session_id) DO UPDATE SET title = excluded.title",
+    )
+    .and_then(|mut stmt| stmt.execute(rusqlite::params![app_type, session_id, title]))
+    .map_err(|e| AppError::Database(format!("写入会话标题失败: {e}")))?;
+    Ok(())
 }
 
 /// 写入 Claude 路径的字节游标。`last_line_offset` 固定写 0：字节游标语义
@@ -1036,8 +1097,6 @@ fn session_costs(conn: &rusqlite::Connection, msg: &ParsedAssistantUsage) -> [St
         output_tokens: msg.output_tokens,
         cache_read_tokens: msg.cache_read_tokens,
         cache_creation_tokens: msg.cache_creation_tokens,
-        model: Some(msg.model.clone()),
-        message_id: None,
     };
     match find_model_pricing_for_session(conn, &msg.model) {
         Some(pricing) => {
@@ -1181,8 +1240,8 @@ fn upsert_session_log_entry_on_conn(
             input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
             input_cost_usd, output_cost_usd, cache_read_cost_usd, cache_creation_cost_usd, total_cost_usd,
             latency_ms, first_token_ms, status_code, error_message, session_id,
-            provider_type, is_streaming, cost_multiplier, created_at, data_source
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
+            provider_type, is_streaming, cost_multiplier, created_at, data_source, project
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
             rusqlite::params![
                 request_id,
                 "_session",         // provider_id: 标记为会话来源
@@ -1208,6 +1267,7 @@ fn upsert_session_log_entry_on_conn(
                 "1.0",              // cost_multiplier
                 created_at,
                 "session_log",      // data_source
+                msg.project.as_deref().unwrap_or(""),
             ],
         )
         .map_err(|e| AppError::Database(format!("插入会话日志失败: {e}")))?;
@@ -1347,6 +1407,7 @@ mod tests {
             stop_reason: None,
             timestamp: Some("2026-04-05T12:00:00Z".to_string()),
             session_id: None,
+            project: None,
         };
         messages.insert("msg_1".to_string(), intermediate);
 
@@ -1361,6 +1422,7 @@ mod tests {
             stop_reason: Some("end_turn".to_string()),
             timestamp: Some("2026-04-05T12:00:00Z".to_string()),
             session_id: None,
+            project: None,
         };
 
         // 应该替换
@@ -1412,6 +1474,7 @@ mod tests {
             stop_reason: Some("end_turn".to_string()),
             timestamp: Some("1970-01-01T00:16:45Z".to_string()),
             session_id: Some("session-1".to_string()),
+            project: None,
         };
 
         let outcome = {
@@ -1431,7 +1494,7 @@ mod tests {
 
     #[test]
     fn test_collect_jsonl_files_includes_subagents() {
-        let tmp = std::env::temp_dir().join(format!("cc-switch-test-{}", uuid::Uuid::new_v4()));
+        let tmp = std::env::temp_dir().join(format!("pigger-switch-test-{}", uuid::Uuid::new_v4()));
         let project = tmp.join("project");
         let session_dir = project.join("test-session");
         let subagents_dir = session_dir.join("subagents");
@@ -1456,7 +1519,7 @@ mod tests {
     fn test_collect_jsonl_files_includes_workflow_subagents() {
         // Claude Code Workflow 把子 agent transcript 嵌在
         // 项目/SESSION_ID/subagents/workflows/wf_<ID>/ 下，比普通子 agent 深一层。
-        let tmp = std::env::temp_dir().join(format!("cc-switch-test-{}", uuid::Uuid::new_v4()));
+        let tmp = std::env::temp_dir().join(format!("pigger-switch-test-{}", uuid::Uuid::new_v4()));
         let project = tmp.join("project");
         let session_dir = project.join("test-session");
         let subagents_dir = session_dir.join("subagents");
@@ -1519,7 +1582,7 @@ mod tests {
     #[test]
     fn test_incremental_append_advances_byte_cursor() -> Result<(), AppError> {
         let db = Database::memory()?;
-        let tmp = std::env::temp_dir().join(format!("cc-switch-test-{}", uuid::Uuid::new_v4()));
+        let tmp = std::env::temp_dir().join(format!("pigger-switch-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&tmp).unwrap();
         let file = tmp.join("session.jsonl");
 
@@ -1557,7 +1620,7 @@ mod tests {
         // 尾段是完整 JSON 但没有换行符：应当导入（不丢数据），但游标停在
         // 上一个完整行末尾；补全换行后重扫靠 request_id 去重不双算
         let db = Database::memory()?;
-        let tmp = std::env::temp_dir().join(format!("cc-switch-test-{}", uuid::Uuid::new_v4()));
+        let tmp = std::env::temp_dir().join(format!("pigger-switch-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&tmp).unwrap();
         let file = tmp.join("session.jsonl");
 
@@ -1595,7 +1658,7 @@ mod tests {
         // 计入行号游标，补全后该行因 line_offset 已计数被永久跳过。字节
         // 游标只推进到最后一个完整行，补全后必须导入
         let db = Database::memory()?;
-        let tmp = std::env::temp_dir().join(format!("cc-switch-test-{}", uuid::Uuid::new_v4()));
+        let tmp = std::env::temp_dir().join(format!("pigger-switch-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&tmp).unwrap();
         let file = tmp.join("session.jsonl");
 
@@ -1636,7 +1699,7 @@ mod tests {
         // msg_a 会重导并在下次 rollup 二次累加。代价（刻意）：msg_a 也
         // 不再重放，丢行优于双算
         let db = Database::memory()?;
-        let tmp = std::env::temp_dir().join(format!("cc-switch-test-{}", uuid::Uuid::new_v4()));
+        let tmp = std::env::temp_dir().join(format!("pigger-switch-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&tmp).unwrap();
         let file = tmp.join("session.jsonl");
 
@@ -1697,7 +1760,7 @@ mod tests {
         // 的尾部指纹能发现。检出后同样钉 EOF 不重放：重写内容里可能混着
         // 已剪的旧事件，从旧偏移切入或回头重扫都会双算
         let db = Database::memory()?;
-        let tmp = std::env::temp_dir().join(format!("cc-switch-test-{}", uuid::Uuid::new_v4()));
+        let tmp = std::env::temp_dir().join(format!("pigger-switch-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&tmp).unwrap();
         let file = tmp.join("session.jsonl");
 
@@ -1730,7 +1793,7 @@ mod tests {
                 "SELECT COUNT(*) FROM proxy_request_logs WHERE request_id = ?1",
                 rusqlite::params![format!(
                     "{}msg_x",
-                    crate::proxy::usage::parser::SESSION_REQUEST_ID_PREFIX
+                    crate::usage::parser::SESSION_REQUEST_ID_PREFIX
                 )],
                 |row| row.get(0),
             )?;
@@ -1758,7 +1821,7 @@ mod tests {
         // 去重对它失明——若退化为全量重读，msg_a 会被重导并在下次 rollup
         // 时二次累加
         let db = Database::memory()?;
-        let tmp = std::env::temp_dir().join(format!("cc-switch-test-{}", uuid::Uuid::new_v4()));
+        let tmp = std::env::temp_dir().join(format!("pigger-switch-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&tmp).unwrap();
         let file = tmp.join("session.jsonl");
         let file_path_str = file.to_string_lossy().to_string();
@@ -1794,7 +1857,7 @@ mod tests {
             "SELECT COUNT(*) FROM proxy_request_logs WHERE request_id = ?1",
             rusqlite::params![format!(
                 "{}msg_a",
-                crate::proxy::usage::parser::SESSION_REQUEST_ID_PREFIX
+                crate::usage::parser::SESSION_REQUEST_ID_PREFIX
             )],
             |row| row.get(0),
         )?;
@@ -1812,7 +1875,7 @@ mod tests {
         // 行号游标超过文件行数（截断/重写后变短）：转换停在 EOF，不导入
         // 任何行——等价旧行号游标对截断文件的"新内容行号偏小被跳过"语义
         let db = Database::memory()?;
-        let tmp = std::env::temp_dir().join(format!("cc-switch-test-{}", uuid::Uuid::new_v4()));
+        let tmp = std::env::temp_dir().join(format!("pigger-switch-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&tmp).unwrap();
         let file = tmp.join("session.jsonl");
         let file_path_str = file.to_string_lossy().to_string();
@@ -1837,12 +1900,55 @@ mod tests {
     }
 
     #[test]
+    fn project_is_the_session_launch_directory_even_after_cd() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let tmp = std::env::temp_dir().join(format!("pigger-switch-test-{}", uuid::Uuid::new_v4()));
+        let project_dir = tmp.join("-work-app");
+        fs::create_dir_all(project_dir.join("sess-1").join("subagents")).unwrap();
+        let line = |id: &str, cwd: &str| {
+            format!(
+                r#"{{"type":"assistant","cwd":"{cwd}","sessionId":"sess-1","message":{{"id":"{id}","model":"claude-opus-4-8","stop_reason":"end_turn","usage":{{"input_tokens":3,"output_tokens":5,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}},"timestamp":"2026-06-07T13:01:23Z"}}"#
+            )
+        };
+        // 主会话：从 /work/app 启动，后来 cd 进了子目录
+        let main = project_dir.join("sess-1.jsonl");
+        fs::write(
+            &main,
+            format!(
+                "{{\"type\":\"mode\",\"sessionId\":\"sess-1\"}}\n{}\n{}\n",
+                line("msg_1", "/work/app"),
+                line("msg_2", "/work/app/src-tauri")
+            ),
+        )
+        .unwrap();
+        // 子 agent：自己的 cwd 是子目录，算在父会话的项目下
+        let sub = project_dir
+            .join("sess-1")
+            .join("subagents")
+            .join("agent-1.jsonl");
+        fs::write(&sub, format!("{}\n", line("msg_3", "/work/app/src-tauri"))).unwrap();
+
+        sync_single_file(&db, &main, None)?;
+        sync_single_file(&db, &sub, None)?;
+
+        let conn = lock_conn!(db.conn);
+        let projects: Vec<String> = conn
+            .prepare("SELECT DISTINCT project FROM proxy_request_logs")?
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        assert_eq!(projects, vec!["/work/app".to_string()]);
+        drop(conn);
+        fs::remove_dir_all(&tmp).ok();
+        Ok(())
+    }
+
+    #[test]
     fn test_sync_imports_billable_message_without_stop_reason() -> Result<(), AppError> {
         // 回归：stop_reason 缺失但有真实 cache/input 成本的 message（Workflow /
         // 子 agent 常见的「只有 message_start 快照、没写最终块」形态）必须被计入，
         // 不能因缺 stop_reason 或 output==0 而整条丢弃；全 0 token 的占位行仍应跳过。
         let db = Database::memory()?;
-        let tmp = std::env::temp_dir().join(format!("cc-switch-test-{}", uuid::Uuid::new_v4()));
+        let tmp = std::env::temp_dir().join(format!("pigger-switch-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&tmp).unwrap();
         let file = tmp.join("agent-wf.jsonl");
 
@@ -1951,7 +2057,7 @@ mod tests {
     }
 
     fn temp_session_file() -> (PathBuf, PathBuf) {
-        let tmp = std::env::temp_dir().join(format!("cc-switch-test-{}", uuid::Uuid::new_v4()));
+        let tmp = std::env::temp_dir().join(format!("pigger-switch-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&tmp).unwrap();
         let file = tmp.join("session.jsonl");
         (tmp, file)
@@ -2189,5 +2295,116 @@ mod tests {
 
         fs::remove_dir_all(&tmp).ok();
         Ok(())
+    }
+}
+
+/// 用本机真实的 `~/.claude` / `~/.codex` 跑一遍完整同步（只读，写进内存库）。
+/// 默认忽略：`cargo test real_logs_smoke -- --ignored --nocapture`
+#[cfg(test)]
+mod real_logs_smoke {
+    use crate::database::Database;
+
+    #[test]
+    #[ignore]
+    #[serial_test::serial]
+    fn real_logs_smoke() {
+        let real_home = dirs::home_dir().expect("home");
+        let temp = tempfile::tempdir().expect("tempdir");
+        for dir in [".claude", ".codex"] {
+            let source = real_home.join(dir);
+            if source.exists() {
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(&source, temp.path().join(dir)).expect("symlink");
+            }
+        }
+        std::env::set_var("PIGGER_SWITCH_TEST_HOME", temp.path());
+
+        let db = Database::memory().expect("db");
+        let started = std::time::Instant::now();
+        let result = super::sync_all_unlocked(&db);
+        println!(
+            "first sync: imported={} skipped={} files={} deferred={} errors={} in {:?}",
+            result.imported,
+            result.skipped,
+            result.files_scanned,
+            result.deferred_files,
+            result.errors.len(),
+            started.elapsed()
+        );
+        for error in result.errors.iter().take(5) {
+            println!("  error: {error}");
+        }
+
+        let again = std::time::Instant::now();
+        let second = super::sync_all_unlocked(&db);
+        println!(
+            "second sync: imported={} files={} in {:?}",
+            second.imported,
+            second.files_scanned,
+            again.elapsed()
+        );
+
+        for app in db.get_usage_summary_by_app(None, None, None, None).unwrap() {
+            println!(
+                "{:>7}: requests={} cost=${} real_tokens={} hit_rate={:.1}%",
+                app.app_type,
+                app.summary.total_requests,
+                app.summary.total_cost,
+                app.summary.real_total_tokens,
+                app.summary.cache_hit_rate * 100.0
+            );
+        }
+        let projects = db.get_project_stats(None, None, None, None, None).unwrap();
+        println!("projects: {}", projects.len());
+        for p in projects.iter().take(6) {
+            println!(
+                "  {:<40} req={:<6} sessions={:<4} cost=${} (claude ${} / codex ${})",
+                p.project,
+                p.request_count,
+                p.session_count,
+                p.total_cost,
+                p.claude_cost,
+                p.codex_cost
+            );
+        }
+        let sessions = db
+            .get_session_stats(None, None, None, None, None, 5)
+            .unwrap();
+        for s in &sessions {
+            println!(
+                "  session {} {:?} model={} req={} cost=${}",
+                &s.session_id[..8.min(s.session_id.len())],
+                s.title,
+                s.model,
+                s.request_count,
+                s.total_cost
+            );
+        }
+        let titled = {
+            let conn = db.conn.lock().unwrap();
+            conn.query_row("SELECT COUNT(*) FROM session_titles", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap()
+        };
+        println!("session titles: {titled}");
+        let activity = db
+            .get_hourly_activity(None, None, None, None, None)
+            .unwrap();
+        println!("hourly cells: {}", activity.len());
+        let unknown_project: i64 = {
+            let conn = db.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT COUNT(*) FROM proxy_request_logs WHERE project = ''",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        println!("rows without project: {unknown_project}");
+        std::env::remove_var("PIGGER_SWITCH_TEST_HOME");
+
+        assert!(result.errors.is_empty(), "sync errors: {:?}", result.errors);
+        assert_eq!(second.imported, 0, "second pass must not re-import");
     }
 }

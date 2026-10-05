@@ -4,16 +4,19 @@
 
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
-use crate::proxy::usage::calculator::ModelPricing;
 use crate::services::sql_helpers::{
     fresh_input_sql, INPUT_TOKEN_SEMANTICS_FRESH, INPUT_TOKEN_SEMANTICS_TOTAL,
 };
+use crate::usage::calculator::ModelPricing;
 use chrono::{Local, NaiveDate, TimeZone, Timelike};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::LazyLock;
+
+/// Claude Code 给 1M 上下文模型名加的后缀（如 `claude-opus-4-6[1m]`），计价时去掉
+const ONE_M_CONTEXT_MARKER: &str = "[1m]";
 
 /// 使用量汇总
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,62 +115,22 @@ pub struct DailyStats {
     pub total_cache_read_tokens: u64,
 }
 
-/// Provider 统计
+/// 项目统计（按会话所在的工作目录分组）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ProviderStats {
-    pub provider_id: String,
-    pub provider_name: String,
+pub struct ProjectStats {
+    /// 工作目录；'' 表示未知（如从 CC Switch 导入的代理记账行）
+    pub project: String,
     pub request_count: u64,
     pub total_tokens: u64,
     pub total_cost: String,
-    pub success_rate: f32,
-    pub avg_latency_ms: u64,
-    /// 速度的分子：满足条件（有首字、输出 >= 100 token、耗时 > 首字）的明细请求的输出 token 之和。
-    /// 汇总速度 = speed_output_tokens / (speed_generation_ms / 1000)，不是逐条平均。
-    /// 日汇总（rollup）没有逐条计时，不计入。
-    pub speed_output_tokens: u64,
-    /// 速度的分母：同一批请求的 (latency_ms - first_token_ms) 之和，单位毫秒。
-    pub speed_generation_ms: u64,
-    /// 估算速度的分子：会话日志导入的请求里，有估算耗时、输出 >= 200 token 的那些的输出之和。
-    /// 和上面那组分开累计：估算的耗时含首字等待，口径不同，不能加在一起。
-    pub est_speed_output_tokens: u64,
-    /// 估算速度的分母：同一批请求的 latency_ms 之和，单位毫秒。
-    pub est_speed_duration_ms: u64,
-}
-
-/// 计速度的门槛：输出少于这个数的请求（工具调用这类）不算速度，避免 0.1 秒回 15 个 token 算出离谱的数。
-pub const SPEED_MIN_OUTPUT_TOKENS: i64 = 100;
-
-/// 生成窗口（耗时 − 首字）短于这个毫秒数时不算速度：中转站缓冲后一次性吐出、
-/// 或短回复整段落在同一个网络包里，算出来的是传输突发而不是生成速度。
-pub const SPEED_MIN_GENERATION_MS: i64 = 100;
-
-/// 明细行能不能计速度的 SQL 条件（和前端 `isSpeedEligible` 同口径）。
-fn speed_eligible_sql(alias: &str) -> String {
-    format!(
-        "{alias}.first_token_ms IS NOT NULL AND {alias}.output_tokens >= {SPEED_MIN_OUTPUT_TOKENS} \
-         AND {alias}.latency_ms - {alias}.first_token_ms >= {SPEED_MIN_GENERATION_MS}"
-    )
-}
-
-/// 估算速度的输出门槛：估算的耗时含首字等待，输出越少首字占比越大、算出来越偏低，
-/// 所以比精确口径的门槛高。实测 200–300 token 的请求比长请求低约四分之一，
-/// 100–200 的低约四成；而 Codex 的请求只有四分之一超过 500，门槛再高大半行都是空的。
-pub const SPEED_ESTIMATE_MIN_OUTPUT_TOKENS: i64 = 200;
-
-/// 估算耗时短于这个毫秒数时不估速度：输出 200 token 以上却不到 1 秒，多半是起点取晚了。
-pub const SPEED_ESTIMATE_MIN_DURATION_MS: i64 = 1000;
-
-/// 明细行能不能估速度的 SQL 条件（和前端 `isSpeedEstimateEligible` 同口径）：
-/// 会话日志导入的行（没有首字计时），耗时是导入时按日志时间戳估的。
-fn speed_estimate_eligible_sql(alias: &str) -> String {
-    let data_source = data_source_expr(alias);
-    format!(
-        "{alias}.first_token_ms IS NULL AND {data_source} <> 'proxy' \
-         AND {alias}.output_tokens >= {SPEED_ESTIMATE_MIN_OUTPUT_TOKENS} \
-         AND {alias}.latency_ms >= {SPEED_ESTIMATE_MIN_DURATION_MS}"
-    )
+    /// 其中 Claude Code / Codex 各自的花费
+    pub claude_cost: String,
+    pub codex_cost: String,
+    /// 明细里出现过的会话数（30 天前已汇总的部分没有会话维度，不计入）
+    pub session_count: u64,
+    /// 最近一次请求的时间（秒）；只有按天汇总的数据时取那天的零点
+    pub last_active_at: i64,
 }
 
 /// 模型统计
@@ -186,7 +149,9 @@ pub struct ModelStats {
 #[serde(rename_all = "camelCase")]
 pub struct LogFilters {
     pub app_type: Option<String>,
-    pub provider_name: Option<String>,
+    pub project: Option<String>,
+    /// 只看某个会话的请求（会话页点进来时用）
+    pub session_id: Option<String>,
     pub model: Option<String>,
     pub status_code: Option<u16>,
     pub start_date: Option<i64>,
@@ -209,8 +174,11 @@ pub struct PaginatedLogs {
 pub struct RequestLogDetail {
     pub request_id: String,
     pub provider_id: String,
+    /// 会话所在的工作目录，'' 表示未知
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub provider_name: Option<String>,
+    pub project: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     pub app_type: String,
     pub model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -242,22 +210,20 @@ pub struct RequestLogDetail {
     pub pricing_model: Option<String>,
 }
 
-/// 把 26 列的查询结果映射为 `RequestLogDetail`。
+/// 把 27 列的查询结果映射为 `RequestLogDetail`。
 ///
-/// 调用方的 SELECT **必须**按以下顺序返回 26 列：
-/// `request_id, provider_id, provider_name, app_type, model, request_model,
+/// 调用方的 SELECT **必须**按以下顺序返回 27 列：
+/// `request_id, provider_id, project, app_type, model, request_model,
 ///  cost_multiplier, input_tokens, output_tokens, cache_read_tokens,
 ///  cache_creation_tokens, input_cost_usd, output_cost_usd, cache_read_cost_usd,
 ///  cache_creation_cost_usd, total_cost_usd, is_streaming, latency_ms,
 ///  first_token_ms, duration_ms, status_code, error_message, created_at,
-///  data_source, pricing_model, input_token_semantics`
-///
-/// 不需要 provider_name 时（如 backfill）SELECT `NULL AS provider_name` 占位即可。
+///  data_source, pricing_model, input_token_semantics, session_id`
 fn row_to_request_log_detail(row: &rusqlite::Row<'_>) -> rusqlite::Result<RequestLogDetail> {
     Ok(RequestLogDetail {
         request_id: row.get(0)?,
         provider_id: row.get(1)?,
-        provider_name: row.get(2)?,
+        project: row.get(2)?,
         app_type: row.get(3)?,
         model: row.get(4)?,
         request_model: row.get(5)?,
@@ -283,25 +249,14 @@ fn row_to_request_log_detail(row: &rusqlite::Row<'_>) -> rusqlite::Result<Reques
         data_source: row.get(23)?,
         pricing_model: row.get(24)?,
         input_token_semantics: row.get::<_, i64>(25)?,
+        session_id: row.get(26)?,
     })
 }
 
-/// SQL fragment: resolve provider_name with fallback for session-based entries.
-/// Session logs use placeholder provider_ids (e.g., `_session`, `_<app>_session`)
-/// that don't exist in the providers table — the CASE expression below is the
-/// authoritative mapping from placeholder to readable name.
-fn provider_name_coalesce(log_alias: &str, provider_alias: &str) -> String {
-    format!(
-        "COALESCE({provider_alias}.name, CASE {log_alias}.provider_id \
-         WHEN '_session' THEN 'Claude (Session)' \
-         WHEN '_codex_session' THEN 'Codex (Session)' \
-         WHEN '_gemini_session' THEN 'Gemini (Session)' \
-         WHEN '_opencode_session' THEN 'OpenCode (Session)' \
-         WHEN '_grok_session' THEN 'Grok Build (Session)' \
-         WHEN '_mcode_session' THEN 'MiniMax Code (Session)' \
-         WHEN '_pi_session' THEN 'Pi (Session)' \
-         ELSE {log_alias}.provider_id END)"
-    )
+/// SQL 标量表达式：行所属的项目（会话所在的工作目录），'' 表示未知。
+/// `proxy_request_logs` 和 `usage_daily_rollups` 都有 `project` 列，两者皆可作为 `log_alias`。
+fn project_expr(log_alias: &str) -> String {
+    format!("{log_alias}.project")
 }
 
 pub(crate) const SESSION_PROXY_DEDUP_WINDOW_SECONDS: i64 = 10 * 60;
@@ -340,18 +295,6 @@ fn folded_app_type_sql(column: &str) -> String {
     format!("CASE WHEN {column} = 'claude-desktop' THEN 'claude' ELSE {column} END")
 }
 
-/// SQL 片段：把日志/汇总行 LEFT JOIN 到 providers 表以取得供应商名称。
-/// `proxy_request_logs` 与 `usage_daily_rollups` 的 (provider_id, app_type)
-/// 形状相同，两者皆可作为 `log_alias`。providers 主键即 (id, app_type)，
-/// 连接至多 1:1，不会放大行数。
-fn providers_join(log_alias: &str, provider_alias: &str) -> String {
-    format!(
-        "LEFT JOIN providers {provider_alias} \
-         ON {log_alias}.provider_id = {provider_alias}.id \
-         AND {log_alias}.app_type = {provider_alias}.app_type"
-    )
-}
-
 /// SQL 标量表达式：行的「有效计价模型」—— pricing_model 非空优先，NULL/'' 回落
 /// model。这是 `get_model_stats` 的分组键，也是 Dashboard 模型筛选的匹配口径：
 /// 筛选值来自模型统计列表，两边必须用同一表达式才能选得中。
@@ -359,26 +302,19 @@ fn effective_model_sql(alias: &str) -> String {
     format!("COALESCE(NULLIF({alias}.pricing_model, ''), {alias}.model)")
 }
 
-/// 把 Dashboard 顶部的 Provider/模型筛选追加到查询条件。
+/// 把 Dashboard 顶部的项目/模型筛选追加到查询条件。
 ///
-/// Provider 按展示名精确匹配（复用 [`provider_name_coalesce`]，会话占位行的
-/// 可读名如 "Claude (Session)" 也能选中）；模型按 [`effective_model_sql`] 匹配。
-/// 注意：传入 `provider_name` 时调用方必须把 [`providers_join`] 拼进 FROM，
-/// 否则 `{provider_alias}.name` 无法解析。
-fn push_provider_model_filters(
+/// 项目按工作目录精确匹配；模型按 [`effective_model_sql`] 匹配。
+fn push_project_model_filters(
     conditions: &mut Vec<String>,
     params: &mut Vec<Box<dyn rusqlite::ToSql>>,
     log_alias: &str,
-    provider_alias: &str,
-    provider_name: Option<&str>,
+    project: Option<&str>,
     model: Option<&str>,
 ) {
-    if let Some(name) = provider_name {
-        conditions.push(format!(
-            "{} = ?",
-            provider_name_coalesce(log_alias, provider_alias)
-        ));
-        params.push(Box::new(name.to_string()));
+    if let Some(project) = project {
+        conditions.push(format!("{} = ?", project_expr(log_alias)));
+        params.push(Box::new(project.to_string()));
     }
     if let Some(m) = model {
         conditions.push(format!("{} = ?", effective_model_sql(log_alias)));
@@ -531,9 +467,10 @@ fn connection_total_changes(conn: &Connection) -> Result<u64, AppError> {
 
 fn log_count_cache_key(filters: &LogFilters) -> String {
     format!(
-        "{:?}|{:?}|{:?}|{:?}|{:?}",
+        "{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
         filters.app_type,
-        filters.provider_name,
+        filters.project,
+        filters.session_id,
         filters.model,
         filters.status_code,
         filters.start_date
@@ -659,40 +596,6 @@ pub(crate) fn has_matching_proxy_usage_log(
             )
         })
         .map_err(|e| AppError::Database(format!("查询重复代理用量日志失败: {e}")))
-}
-
-/// grokbuild 会话导入的接管活动守卫：给定时刻 ±窗口内存在任何 grokbuild
-/// 代理直录行，即认为当时处于代理接管态，会话事件应整体跳过——同一请求
-/// 已由代理逐请求记账，会话侧再入账必双算。
-///
-/// 不复用 [`has_matching_proxy_usage_log`] 的指纹匹配：Grok 会话事件是
-/// 逐轮聚合值，与代理逐请求行的 token 值结构性不相等，指纹永不命中。
-/// 这里按"接管态检测"而非"行匹配"设计，故不过滤 status_code——失败的
-/// 代理请求同样证明流量正走代理。
-///
-/// 已知局限（有意取舍，方向保守只漏不双）：窗口不含 session 维度，任一
-/// grokbuild 代理行会给 ±窗口内的全部会话事件投下阴影——接管/官方两态在
-/// 十分钟内交替或并行使用时，官方侧轮次会被跳过（漏记而非双算）。
-pub(crate) fn has_recent_grokbuild_proxy_activity(
-    conn: &Connection,
-    created_at: i64,
-) -> Result<bool, AppError> {
-    let l_data_source = data_source_expr("l");
-    let sql = format!(
-        "SELECT EXISTS (
-            SELECT 1
-            FROM proxy_request_logs l
-            WHERE {l_data_source} = 'proxy'
-              AND l.app_type = 'grokbuild'
-              AND l.created_at BETWEEN ?1 - ?2 AND ?1 + ?2
-        )"
-    );
-    conn.query_row(
-        &sql,
-        params![created_at, SESSION_PROXY_DEDUP_WINDOW_SECONDS],
-        |row| row.get::<_, bool>(0),
-    )
-    .map_err(|e| AppError::Database(format!("查询 Grok 接管活动失败: {e}")))
 }
 
 static SUSPECTED_CODEX_DUPLICATE_SQL: LazyLock<String> = LazyLock::new(|| {
@@ -833,7 +736,7 @@ impl Database {
         start_date: Option<i64>,
         end_date: Option<i64>,
         app_type: Option<&str>,
-        provider_name: Option<&str>,
+        project: Option<&str>,
         model: Option<&str>,
     ) -> Result<UsageSummary, AppError> {
         let conn = lock_conn!(self.conn);
@@ -856,24 +759,12 @@ impl Database {
             conditions.push(format!("{} = ?", folded_app_type_sql("l.app_type")));
             params_vec.push(Box::new(at.to_string()));
         }
-        push_provider_model_filters(
-            &mut conditions,
-            &mut params_vec,
-            "l",
-            "p",
-            provider_name,
-            model,
-        );
+        push_project_model_filters(&mut conditions, &mut params_vec, "l", project, model);
 
         let where_clause = if conditions.is_empty() {
             String::new()
         } else {
             format!("WHERE {}", conditions.join(" AND "))
-        };
-        let detail_join = if provider_name.is_some() {
-            providers_join("l", "p")
-        } else {
-            String::new()
         };
 
         // Only include rolled-up rows for full local days that are fully covered by the range.
@@ -891,12 +782,11 @@ impl Database {
             rollup_conditions.push(format!("{} = ?", folded_app_type_sql("r.app_type")));
             rollup_params.push(Box::new(at.to_string()));
         }
-        push_provider_model_filters(
+        push_project_model_filters(
             &mut rollup_conditions,
             &mut rollup_params,
             "r",
-            "p2",
-            provider_name,
+            project,
             model,
         );
 
@@ -904,11 +794,6 @@ impl Database {
             String::new()
         } else {
             format!("WHERE {}", rollup_conditions.join(" AND "))
-        };
-        let rollup_join = if provider_name.is_some() {
-            providers_join("r", "p2")
-        } else {
-            String::new()
         };
 
         let fresh_input_detail = fresh_input_sql("l");
@@ -931,7 +816,7 @@ impl Database {
                     COALESCE(SUM(l.cache_creation_tokens), 0) as total_cache_creation_tokens,
                     COALESCE(SUM(l.cache_read_tokens), 0) as total_cache_read_tokens,
                     COALESCE(SUM(CASE WHEN l.status_code >= 200 AND l.status_code < 300 THEN 1 ELSE 0 END), 0) as success_count
-                 FROM proxy_request_logs l {detail_join} {where_clause}) d,
+                 FROM proxy_request_logs l {where_clause}) d,
                 (SELECT
                     COALESCE(SUM(r.request_count), 0) as total_requests,
                     COALESCE(SUM(CAST(r.total_cost_usd AS REAL)), 0) as total_cost,
@@ -940,7 +825,7 @@ impl Database {
                     COALESCE(SUM(r.cache_creation_tokens), 0) as total_cache_creation_tokens,
                     COALESCE(SUM(r.cache_read_tokens), 0) as total_cache_read_tokens,
                     COALESCE(SUM(r.success_count), 0) as success_count
-                 FROM usage_daily_rollups r {rollup_join} {rollup_where}) r"
+                 FROM usage_daily_rollups r {rollup_where}) r"
         );
 
         // Combine params: detail params first, then rollup params
@@ -998,7 +883,7 @@ impl Database {
         &self,
         start_date: Option<i64>,
         end_date: Option<i64>,
-        provider_name: Option<&str>,
+        project: Option<&str>,
         model: Option<&str>,
     ) -> Result<Vec<UsageSummaryByApp>, AppError> {
         let conn = lock_conn!(self.conn);
@@ -1015,20 +900,14 @@ impl Database {
             detail_conditions.push("l.created_at <= ?".to_string());
             detail_params.push(Box::new(end));
         }
-        push_provider_model_filters(
+        push_project_model_filters(
             &mut detail_conditions,
             &mut detail_params,
             "l",
-            "p",
-            provider_name,
+            project,
             model,
         );
         let detail_where = format!("WHERE {}", detail_conditions.join(" AND "));
-        let detail_join = if provider_name.is_some() {
-            providers_join("l", "p")
-        } else {
-            String::new()
-        };
 
         let rollup_bounds = compute_rollup_date_bounds(start_date, end_date)?;
         let mut rollup_conditions: Vec<String> = Vec::new();
@@ -1039,23 +918,17 @@ impl Database {
             "r.date",
             &rollup_bounds,
         );
-        push_provider_model_filters(
+        push_project_model_filters(
             &mut rollup_conditions,
             &mut rollup_params,
             "r",
-            "p2",
-            provider_name,
+            project,
             model,
         );
         let rollup_where = if rollup_conditions.is_empty() {
             String::new()
         } else {
             format!("WHERE {}", rollup_conditions.join(" AND "))
-        };
-        let rollup_join = if provider_name.is_some() {
-            providers_join("r", "p2")
-        } else {
-            String::new()
         };
 
         let fresh_input_detail = fresh_input_sql("l");
@@ -1082,7 +955,7 @@ impl Database {
                     COALESCE(SUM(l.cache_creation_tokens), 0) as cache_create_t,
                     COALESCE(SUM(l.cache_read_tokens), 0) as cache_read_t,
                     COALESCE(SUM(CASE WHEN l.status_code >= 200 AND l.status_code < 300 THEN 1 ELSE 0 END), 0) as success_count
-                FROM proxy_request_logs l {detail_join} {detail_where}
+                FROM proxy_request_logs l {detail_where}
                 GROUP BY l.app_type
                 UNION ALL
                 SELECT {rollup_app_type} as app_type,
@@ -1093,7 +966,7 @@ impl Database {
                     COALESCE(SUM(r.cache_creation_tokens), 0),
                     COALESCE(SUM(r.cache_read_tokens), 0),
                     COALESCE(SUM(r.success_count), 0)
-                FROM usage_daily_rollups r {rollup_join} {rollup_where}
+                FROM usage_daily_rollups r {rollup_where}
                 GROUP BY r.app_type
             )
             GROUP BY app_type"
@@ -1164,7 +1037,7 @@ impl Database {
         start_date: Option<i64>,
         end_date: Option<i64>,
         app_type: Option<&str>,
-        provider_name: Option<&str>,
+        project: Option<&str>,
         model: Option<&str>,
     ) -> Result<Vec<DailyStats>, AppError> {
         let conn = lock_conn!(self.conn);
@@ -1195,12 +1068,11 @@ impl Database {
                 extra_conditions.push(format!("{} = ?", folded_app_type_sql("l.app_type")));
                 extra_params.push(Box::new(at.to_string()));
             }
-            push_provider_model_filters(
+            push_project_model_filters(
                 &mut extra_conditions,
                 &mut extra_params,
                 "l",
-                "p",
-                provider_name,
+                project,
                 model,
             );
             let extra_filter = extra_conditions
@@ -1208,11 +1080,6 @@ impl Database {
                 .map(|c| format!("AND {c}"))
                 .collect::<Vec<_>>()
                 .join(" ");
-            let detail_join = if provider_name.is_some() {
-                providers_join("l", "p")
-            } else {
-                String::new()
-            };
 
             let effective_filter =
                 effective_usage_log_filter_for_range(&conn, "l", Some(start_ts), Some(end_ts))?;
@@ -1227,7 +1094,7 @@ impl Database {
                     COALESCE(SUM(l.output_tokens), 0) as total_output_tokens,
                     COALESCE(SUM(l.cache_creation_tokens), 0) as total_cache_creation_tokens,
                     COALESCE(SUM(l.cache_read_tokens), 0) as total_cache_read_tokens
-                FROM proxy_request_logs l {detail_join}
+                FROM proxy_request_logs l
                 WHERE l.created_at >= ?1 AND l.created_at <= ?2
                   AND {effective_filter} {extra_filter}
                 GROUP BY bucket_idx
@@ -1309,12 +1176,11 @@ impl Database {
             extra_conditions.push(format!("{} = ?", folded_app_type_sql("l.app_type")));
             extra_params.push(Box::new(at.to_string()));
         }
-        push_provider_model_filters(
+        push_project_model_filters(
             &mut extra_conditions,
             &mut extra_params,
             "l",
-            "p",
-            provider_name,
+            project,
             model,
         );
         let extra_filter = extra_conditions
@@ -1322,11 +1188,6 @@ impl Database {
             .map(|c| format!("AND {c}"))
             .collect::<Vec<_>>()
             .join(" ");
-        let detail_join = if provider_name.is_some() {
-            providers_join("l", "p")
-        } else {
-            String::new()
-        };
 
         let effective_filter =
             effective_usage_log_filter_for_range(&conn, "l", Some(start_ts), Some(end_ts))?;
@@ -1341,7 +1202,7 @@ impl Database {
                 COALESCE(SUM(l.output_tokens), 0) as total_output_tokens,
                 COALESCE(SUM(l.cache_creation_tokens), 0) as total_cache_creation_tokens,
                 COALESCE(SUM(l.cache_read_tokens), 0) as total_cache_read_tokens
-            FROM proxy_request_logs l {detail_join}
+            FROM proxy_request_logs l
             WHERE l.created_at >= ?1 AND l.created_at <= ?2
               AND {effective_filter} {extra_filter}
             GROUP BY bucket_date
@@ -1393,12 +1254,11 @@ impl Database {
             rollup_conditions.push(format!("{} = ?", folded_app_type_sql("r.app_type")));
             rollup_params.push(Box::new(at.to_string()));
         }
-        push_provider_model_filters(
+        push_project_model_filters(
             &mut rollup_conditions,
             &mut rollup_params,
             "r",
-            "p2",
-            provider_name,
+            project,
             model,
         );
 
@@ -1406,11 +1266,6 @@ impl Database {
             String::new()
         } else {
             format!("WHERE {}", rollup_conditions.join(" AND "))
-        };
-        let rollup_join = if provider_name.is_some() {
-            providers_join("r", "p2")
-        } else {
-            String::new()
         };
 
         let fresh_input_rollup = fresh_input_sql("r");
@@ -1424,7 +1279,7 @@ impl Database {
                 COALESCE(SUM(r.output_tokens), 0),
                 COALESCE(SUM(r.cache_creation_tokens), 0),
                 COALESCE(SUM(r.cache_read_tokens), 0)
-            FROM usage_daily_rollups r {rollup_join}
+            FROM usage_daily_rollups r
             {rollup_where}
             GROUP BY r.date
             ORDER BY r.date ASC"
@@ -1500,15 +1355,15 @@ impl Database {
         Ok(stats)
     }
 
-    /// 获取 Provider 统计
-    pub fn get_provider_stats(
+    /// 获取项目统计
+    pub fn get_project_stats(
         &self,
         start_date: Option<i64>,
         end_date: Option<i64>,
         app_type: Option<&str>,
-        provider_name: Option<&str>,
+        project: Option<&str>,
         model: Option<&str>,
-    ) -> Result<Vec<ProviderStats>, AppError> {
+    ) -> Result<Vec<ProjectStats>, AppError> {
         let conn = lock_conn!(self.conn);
 
         let mut detail_conditions = vec![effective_usage_log_filter_for_range(
@@ -1527,19 +1382,14 @@ impl Database {
             detail_conditions.push(format!("{} = ?", folded_app_type_sql("l.app_type")));
             detail_params.push(Box::new(at.to_string()));
         }
-        push_provider_model_filters(
+        push_project_model_filters(
             &mut detail_conditions,
             &mut detail_params,
             "l",
-            "p",
-            provider_name,
+            project,
             model,
         );
-        let detail_where = if detail_conditions.is_empty() {
-            String::new()
-        } else {
-            format!("WHERE {}", detail_conditions.join(" AND "))
-        };
+        let detail_where = format!("WHERE {}", detail_conditions.join(" AND "));
 
         let mut rollup_conditions = Vec::new();
         let mut rollup_params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -1554,12 +1404,11 @@ impl Database {
             rollup_conditions.push(format!("{} = ?", folded_app_type_sql("r.app_type")));
             rollup_params.push(Box::new(at.to_string()));
         }
-        push_provider_model_filters(
+        push_project_model_filters(
             &mut rollup_conditions,
             &mut rollup_params,
             "r",
-            "p2",
-            provider_name,
+            project,
             model,
         );
         let rollup_where = if rollup_conditions.is_empty() {
@@ -1568,100 +1417,71 @@ impl Database {
             format!("WHERE {}", rollup_conditions.join(" AND "))
         };
 
-        // UNION detail logs + rollup data, then aggregate
-        let detail_pname = provider_name_coalesce("l", "p");
-        let rollup_pname = provider_name_coalesce("r", "p2");
+        let detail_app = folded_app_type_sql("l.app_type");
+        let rollup_app = folded_app_type_sql("r.app_type");
         let fresh_input_detail = fresh_input_sql("l");
         let fresh_input_rollup = fresh_input_sql("r");
-        let speed_ok = speed_eligible_sql("l");
-        let est_ok = speed_estimate_eligible_sql("l");
         let sql = format!(
             "SELECT
-                provider_id, app_type, provider_name,
-                SUM(request_count) as request_count,
-                SUM(total_tokens) as total_tokens,
-                SUM(total_cost) as total_cost,
-                SUM(success_count) as success_count,
-                CASE WHEN SUM(request_count) > 0
-                    THEN SUM(latency_sum) / SUM(request_count)
-                    ELSE 0 END as avg_latency,
-                SUM(speed_output) as speed_output,
-                SUM(speed_gen_ms) as speed_gen_ms,
-                SUM(est_output) as est_output,
-                SUM(est_ms) as est_ms
+                project,
+                SUM(request_count),
+                SUM(total_tokens),
+                SUM(total_cost),
+                SUM(claude_cost),
+                SUM(codex_cost),
+                SUM(session_count),
+                MAX(last_active_at)
             FROM (
-                SELECT l.provider_id, l.app_type,
-                    {detail_pname} as provider_name,
+                SELECT l.project as project,
                     COUNT(*) as request_count,
                     COALESCE(SUM({fresh_input_detail} + l.output_tokens), 0) as total_tokens,
                     COALESCE(SUM(CAST(l.total_cost_usd AS REAL)), 0) as total_cost,
-                    COALESCE(SUM(CASE WHEN l.status_code >= 200 AND l.status_code < 300 THEN 1 ELSE 0 END), 0) as success_count,
-                    COALESCE(SUM(l.latency_ms), 0) as latency_sum,
-                    COALESCE(SUM(CASE WHEN {speed_ok} THEN l.output_tokens ELSE 0 END), 0) as speed_output,
-                    COALESCE(SUM(CASE WHEN {speed_ok} THEN l.latency_ms - l.first_token_ms ELSE 0 END), 0) as speed_gen_ms,
-                    COALESCE(SUM(CASE WHEN {est_ok} THEN l.output_tokens ELSE 0 END), 0) as est_output,
-                    COALESCE(SUM(CASE WHEN {est_ok} THEN l.latency_ms ELSE 0 END), 0) as est_ms
+                    COALESCE(SUM(CASE WHEN {detail_app} = 'claude'
+                        THEN CAST(l.total_cost_usd AS REAL) ELSE 0 END), 0) as claude_cost,
+                    COALESCE(SUM(CASE WHEN {detail_app} = 'codex'
+                        THEN CAST(l.total_cost_usd AS REAL) ELSE 0 END), 0) as codex_cost,
+                    COUNT(DISTINCT l.session_id) as session_count,
+                    MAX(l.created_at) as last_active_at
                 FROM proxy_request_logs l
-                LEFT JOIN providers p ON l.provider_id = p.id AND l.app_type = p.app_type
                 {detail_where}
-                GROUP BY l.provider_id, l.app_type
+                GROUP BY l.project
                 UNION ALL
-                SELECT r.provider_id, r.app_type,
-                    {rollup_pname} as provider_name,
+                SELECT r.project,
                     COALESCE(SUM(r.request_count), 0),
                     COALESCE(SUM({fresh_input_rollup} + r.output_tokens), 0),
                     COALESCE(SUM(CAST(r.total_cost_usd AS REAL)), 0),
-                    COALESCE(SUM(r.success_count), 0),
-                    COALESCE(SUM(r.avg_latency_ms * r.request_count), 0),
+                    COALESCE(SUM(CASE WHEN {rollup_app} = 'claude'
+                        THEN CAST(r.total_cost_usd AS REAL) ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN {rollup_app} = 'codex'
+                        THEN CAST(r.total_cost_usd AS REAL) ELSE 0 END), 0),
                     0,
-                    0,
-                    0,
-                    0
+                    COALESCE(MAX(CAST(strftime('%s', r.date, 'utc') AS INTEGER)), 0)
                 FROM usage_daily_rollups r
-                LEFT JOIN providers p2 ON r.provider_id = p2.id AND r.app_type = p2.app_type
                 {rollup_where}
-                GROUP BY r.provider_id, r.app_type
+                GROUP BY r.project
             )
-            GROUP BY provider_id, app_type
-            ORDER BY total_cost DESC"
+            GROUP BY project
+            ORDER BY SUM(total_cost) DESC, SUM(request_count) DESC"
         );
 
         let mut stmt = conn.prepare(&sql)?;
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = detail_params;
         params.extend(rollup_params);
         let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-        let row_mapper = |row: &rusqlite::Row| {
-            let request_count: i64 = row.get(3)?;
-            let success_count: i64 = row.get(6)?;
-            let success_rate = if request_count > 0 {
-                (success_count as f32 / request_count as f32) * 100.0
-            } else {
-                0.0
-            };
-
-            Ok(ProviderStats {
-                provider_id: row.get(0)?,
-                provider_name: row.get(2)?,
-                request_count: request_count as u64,
-                total_tokens: row.get::<_, i64>(4)? as u64,
-                total_cost: format!("{:.6}", row.get::<_, f64>(5)?),
-                success_rate,
-                avg_latency_ms: row.get::<_, f64>(7)? as u64,
-                speed_output_tokens: row.get::<_, i64>(8)?.max(0) as u64,
-                speed_generation_ms: row.get::<_, i64>(9)?.max(0) as u64,
-                est_speed_output_tokens: row.get::<_, i64>(10)?.max(0) as u64,
-                est_speed_duration_ms: row.get::<_, i64>(11)?.max(0) as u64,
+        let rows = stmt.query_map(param_refs.as_slice(), |row| {
+            Ok(ProjectStats {
+                project: row.get(0)?,
+                request_count: row.get::<_, i64>(1)?.max(0) as u64,
+                total_tokens: row.get::<_, i64>(2)?.max(0) as u64,
+                total_cost: format!("{:.6}", row.get::<_, f64>(3)?),
+                claude_cost: format!("{:.6}", row.get::<_, f64>(4)?),
+                codex_cost: format!("{:.6}", row.get::<_, f64>(5)?),
+                session_count: row.get::<_, i64>(6)?.max(0) as u64,
+                last_active_at: row.get::<_, Option<i64>>(7)?.unwrap_or(0),
             })
-        };
+        })?;
 
-        let rows = stmt.query_map(param_refs.as_slice(), row_mapper)?;
-
-        let mut stats = Vec::new();
-        for row in rows {
-            stats.push(row?);
-        }
-
-        Ok(stats)
+        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
     }
 
     /// 获取模型统计
@@ -1670,7 +1490,7 @@ impl Database {
         start_date: Option<i64>,
         end_date: Option<i64>,
         app_type: Option<&str>,
-        provider_name: Option<&str>,
+        project: Option<&str>,
         model: Option<&str>,
     ) -> Result<Vec<ModelStats>, AppError> {
         let conn = lock_conn!(self.conn);
@@ -1691,23 +1511,17 @@ impl Database {
             detail_conditions.push(format!("{} = ?", folded_app_type_sql("l.app_type")));
             detail_params.push(Box::new(at.to_string()));
         }
-        push_provider_model_filters(
+        push_project_model_filters(
             &mut detail_conditions,
             &mut detail_params,
             "l",
-            "p",
-            provider_name,
+            project,
             model,
         );
         let detail_where = if detail_conditions.is_empty() {
             String::new()
         } else {
             format!("WHERE {}", detail_conditions.join(" AND "))
-        };
-        let detail_join = if provider_name.is_some() {
-            providers_join("l", "p")
-        } else {
-            String::new()
         };
 
         let mut rollup_conditions = Vec::new();
@@ -1723,23 +1537,17 @@ impl Database {
             rollup_conditions.push(format!("{} = ?", folded_app_type_sql("r.app_type")));
             rollup_params.push(Box::new(at.to_string()));
         }
-        push_provider_model_filters(
+        push_project_model_filters(
             &mut rollup_conditions,
             &mut rollup_params,
             "r",
-            "p2",
-            provider_name,
+            project,
             model,
         );
         let rollup_where = if rollup_conditions.is_empty() {
             String::new()
         } else {
             format!("WHERE {}", rollup_conditions.join(" AND "))
-        };
-        let rollup_join = if provider_name.is_some() {
-            providers_join("r", "p2")
-        } else {
-            String::new()
         };
 
         // UNION detail logs + rollup data
@@ -1764,7 +1572,6 @@ impl Database {
                     COALESCE(SUM({fresh_input_detail} + l.output_tokens), 0) as total_tokens,
                     COALESCE(SUM(CAST(l.total_cost_usd AS REAL)), 0) as total_cost
                 FROM proxy_request_logs l
-                {detail_join}
                 {detail_where}
                 GROUP BY {detail_model}
                 UNION ALL
@@ -1773,7 +1580,6 @@ impl Database {
                     COALESCE(SUM({fresh_input_rollup} + r.output_tokens), 0),
                     COALESCE(SUM(CAST(r.total_cost_usd AS REAL)), 0)
                 FROM usage_daily_rollups r
-                {rollup_join}
                 {rollup_where}
                 GROUP BY {rollup_model}
             )
@@ -1836,16 +1642,18 @@ impl Database {
             conditions.push(format!("{} = ?", folded_app_type_sql("l.app_type")));
             params.push(Box::new(app_type.clone()));
         }
-        // 与 Dashboard 顶部下拉筛选同口径：Provider 按展示名精确匹配（会话占位
-        // 行如 "Claude (Session)" 也能命中），模型按有效计价模型匹配。
-        push_provider_model_filters(
+        // 与 Dashboard 顶部下拉筛选同口径：项目按工作目录精确匹配，模型按有效计价模型匹配。
+        push_project_model_filters(
             &mut conditions,
             &mut params,
             "l",
-            "p",
-            filters.provider_name.as_deref(),
+            filters.project.as_deref(),
             filters.model.as_deref(),
         );
+        if let Some(ref session_id) = filters.session_id {
+            conditions.push("l.session_id = ?".to_string());
+            params.push(Box::new(session_id.clone()));
+        }
         if let Some(status) = filters.status_code {
             conditions.push("l.status_code = ?".to_string());
             params.push(Box::new(status as i64));
@@ -1868,7 +1676,6 @@ impl Database {
         // 获取总数
         let count_sql = format!(
             "SELECT COUNT(*) FROM proxy_request_logs l
-             LEFT JOIN providers p ON l.provider_id = p.id AND l.app_type = p.app_type
              {where_clause}"
         );
         let mut count_cache = lock_conn!(self.log_count_cache);
@@ -1897,17 +1704,16 @@ impl Database {
         params.push(Box::new(page_size as i64));
         params.push(Box::new(offset as i64));
 
-        let logs_pname = provider_name_coalesce("l", "p");
+        let logs_pname = project_expr("l");
         let sql = format!(
-            "SELECT l.request_id, l.provider_id, {logs_pname} as provider_name, l.app_type, l.model,
+            "SELECT l.request_id, l.provider_id, {logs_pname} as project, l.app_type, l.model,
                     l.request_model, l.cost_multiplier,
                     l.input_tokens, l.output_tokens, l.cache_read_tokens, l.cache_creation_tokens,
                     l.input_cost_usd, l.output_cost_usd, l.cache_read_cost_usd, l.cache_creation_cost_usd, l.total_cost_usd,
                     l.is_streaming, l.latency_ms, l.first_token_ms, l.duration_ms,
                     l.status_code, l.error_message, l.created_at, l.data_source, l.pricing_model,
-                    l.input_token_semantics
+                    l.input_token_semantics, l.session_id
              FROM proxy_request_logs l
-             LEFT JOIN providers p ON l.provider_id = p.id AND l.app_type = p.app_type
              {where_clause}
              ORDER BY l.created_at DESC
              LIMIT ? OFFSET ?"
@@ -1941,17 +1747,16 @@ impl Database {
     ) -> Result<Option<RequestLogDetail>, AppError> {
         let conn = lock_conn!(self.conn);
 
-        let detail_pname = provider_name_coalesce("l", "p");
+        let detail_pname = project_expr("l");
         let detail_sql = format!(
-            "SELECT l.request_id, l.provider_id, {detail_pname} as provider_name, l.app_type, l.model,
+            "SELECT l.request_id, l.provider_id, {detail_pname} as project, l.app_type, l.model,
                     l.request_model, l.cost_multiplier,
                     l.input_tokens, l.output_tokens, l.cache_read_tokens, l.cache_creation_tokens,
                     l.input_cost_usd, l.output_cost_usd, l.cache_read_cost_usd, l.cache_creation_cost_usd, l.total_cost_usd,
                     l.is_streaming, l.latency_ms, l.first_token_ms, l.duration_ms,
                     l.status_code, l.error_message, l.created_at, l.data_source, l.pricing_model,
-                    l.input_token_semantics
+                    l.input_token_semantics, l.session_id
              FROM proxy_request_logs l
-             LEFT JOIN providers p ON l.provider_id = p.id AND l.app_type = p.app_type
              WHERE l.request_id = ?"
         );
         let result = conn.query_row(&detail_sql, [request_id], row_to_request_log_detail);
@@ -1966,108 +1771,175 @@ impl Database {
             Err(e) => Err(AppError::Database(e.to_string())),
         }
     }
-
-    /// 检查 Provider 使用限额
-    pub fn check_provider_limits(
-        &self,
-        provider_id: &str,
-        app_type: &str,
-    ) -> Result<ProviderLimitStatus, AppError> {
-        let conn = lock_conn!(self.conn);
-
-        // 获取 provider 的限额设置
-        let (limit_daily, limit_monthly) = conn
-            .query_row(
-                "SELECT meta FROM providers WHERE id = ? AND app_type = ?",
-                params![provider_id, app_type],
-                |row| {
-                    let meta_str: String = row.get(0)?;
-                    Ok(meta_str)
-                },
-            )
-            .ok()
-            .and_then(|meta_str| serde_json::from_str::<serde_json::Value>(&meta_str).ok())
-            .map(|meta| {
-                let daily = meta
-                    .get("limitDailyUsd")
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| s.parse::<f64>().ok());
-                let monthly = meta
-                    .get("limitMonthlyUsd")
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| s.parse::<f64>().ok());
-                (daily, monthly)
-            })
-            .unwrap_or((None, None));
-
-        // 计算今日使用量 (detail logs + rollup)
-        let daily_usage: f64 = conn
-            .query_row(
-                "SELECT COALESCE(SUM(cost), 0) FROM (
-                    SELECT CAST(total_cost_usd AS REAL) as cost
-                    FROM proxy_request_logs
-                    WHERE provider_id = ? AND app_type = ?
-                      AND date(datetime(created_at, 'unixepoch', 'localtime')) = date('now', 'localtime')
-                    UNION ALL
-                    SELECT CAST(total_cost_usd AS REAL)
-                    FROM usage_daily_rollups
-                    WHERE provider_id = ? AND app_type = ?
-                      AND date = date('now', 'localtime')
-                )",
-                params![provider_id, app_type, provider_id, app_type],
-                |row| row.get(0),
-            )
-            .unwrap_or(0.0);
-
-        // 计算本月使用量 (detail logs + rollup)
-        let monthly_usage: f64 = conn
-            .query_row(
-                "SELECT COALESCE(SUM(cost), 0) FROM (
-                    SELECT CAST(total_cost_usd AS REAL) as cost
-                    FROM proxy_request_logs
-                    WHERE provider_id = ? AND app_type = ?
-                      AND strftime('%Y-%m', datetime(created_at, 'unixepoch', 'localtime')) = strftime('%Y-%m', 'now', 'localtime')
-                    UNION ALL
-                    SELECT CAST(total_cost_usd AS REAL)
-                    FROM usage_daily_rollups
-                    WHERE provider_id = ? AND app_type = ?
-                      AND strftime('%Y-%m', date) = strftime('%Y-%m', 'now', 'localtime')
-                )",
-                params![provider_id, app_type, provider_id, app_type],
-                |row| row.get(0),
-            )
-            .unwrap_or(0.0);
-
-        let daily_exceeded = limit_daily
-            .map(|limit| daily_usage >= limit)
-            .unwrap_or(false);
-        let monthly_exceeded = limit_monthly
-            .map(|limit| monthly_usage >= limit)
-            .unwrap_or(false);
-
-        Ok(ProviderLimitStatus {
-            provider_id: provider_id.to_string(),
-            daily_usage: format!("{daily_usage:.6}"),
-            daily_limit: limit_daily.map(|l| format!("{l:.2}")),
-            daily_exceeded,
-            monthly_usage: format!("{monthly_usage:.6}"),
-            monthly_limit: limit_monthly.map(|l| format!("{l:.2}")),
-            monthly_exceeded,
-        })
-    }
 }
 
-/// Provider 限额状态
+/// 会话统计（会话页的一行）。只来自明细：30 天前的明细已汇总进按天表，没有会话维度。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ProviderLimitStatus {
-    pub provider_id: String,
-    pub daily_usage: String,
-    pub daily_limit: Option<String>,
-    pub daily_exceeded: bool,
-    pub monthly_usage: String,
-    pub monthly_limit: Option<String>,
-    pub monthly_exceeded: bool,
+pub struct SessionStats {
+    pub app_type: String,
+    pub session_id: String,
+    /// Claude Code 起的会话标题；Codex 没有
+    pub title: Option<String>,
+    pub project: String,
+    /// 用得最多的模型
+    pub model: String,
+    pub request_count: u64,
+    pub total_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub total_cost: String,
+    pub first_at: i64,
+    pub last_at: i64,
+}
+
+/// 一周里某天某小时的活动量（本地时间；weekday 0 = 周一）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HourlyActivity {
+    pub weekday: u8,
+    pub hour: u8,
+    pub request_count: u64,
+    pub total_tokens: u64,
+    pub total_cost: String,
+}
+
+impl Database {
+    /// 明细查询的公共 WHERE：去重 + 时间 + 应用 + 项目/模型。只查明细表。
+    fn detail_where(
+        conn: &Connection,
+        start_date: Option<i64>,
+        end_date: Option<i64>,
+        app_type: Option<&str>,
+        project: Option<&str>,
+        model: Option<&str>,
+    ) -> Result<(String, Vec<Box<dyn rusqlite::ToSql>>), AppError> {
+        let mut conditions = vec![effective_usage_log_filter_for_range(
+            conn, "l", start_date, end_date,
+        )?];
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if let Some(start) = start_date {
+            conditions.push("l.created_at >= ?".to_string());
+            params.push(Box::new(start));
+        }
+        if let Some(end) = end_date {
+            conditions.push("l.created_at <= ?".to_string());
+            params.push(Box::new(end));
+        }
+        if let Some(at) = app_type {
+            conditions.push(format!("{} = ?", folded_app_type_sql("l.app_type")));
+            params.push(Box::new(at.to_string()));
+        }
+        push_project_model_filters(&mut conditions, &mut params, "l", project, model);
+        Ok((format!("WHERE {}", conditions.join(" AND ")), params))
+    }
+
+    /// 按会话汇总（花费从高到低），最多 `limit` 条
+    pub fn get_session_stats(
+        &self,
+        start_date: Option<i64>,
+        end_date: Option<i64>,
+        app_type: Option<&str>,
+        project: Option<&str>,
+        model: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<SessionStats>, AppError> {
+        let conn = lock_conn!(self.conn);
+        let (where_clause, mut params) =
+            Self::detail_where(&conn, start_date, end_date, app_type, project, model)?;
+        let app_expr = folded_app_type_sql("l.app_type");
+        let fresh_input = fresh_input_sql("l");
+        let model_expr = effective_model_sql("l");
+        let sql = format!(
+            "WITH rows AS (
+                SELECT {app_expr} AS app, l.session_id AS sid, l.project AS project,
+                       {model_expr} AS model,
+                       {fresh_input} + l.output_tokens AS tokens,
+                       l.cache_read_tokens AS cache_read,
+                       CAST(l.total_cost_usd AS REAL) AS cost,
+                       l.created_at AS created_at
+                FROM proxy_request_logs l
+                {where_clause} AND l.session_id IS NOT NULL AND l.session_id <> ''
+            ),
+            per_model AS (
+                SELECT app, sid, model, COUNT(*) AS n,
+                       ROW_NUMBER() OVER (PARTITION BY app, sid ORDER BY COUNT(*) DESC, model) AS rk
+                FROM rows GROUP BY app, sid, model
+            )
+            SELECT r.app, r.sid, t.title, MAX(r.project), m.model,
+                   COUNT(*), COALESCE(SUM(r.tokens), 0), COALESCE(SUM(r.cache_read), 0),
+                   COALESCE(SUM(r.cost), 0), MIN(r.created_at), MAX(r.created_at)
+            FROM rows r
+            JOIN per_model m ON m.app = r.app AND m.sid = r.sid AND m.rk = 1
+            LEFT JOIN session_titles t ON t.app_type = r.app AND t.session_id = r.sid
+            GROUP BY r.app, r.sid
+            ORDER BY SUM(r.cost) DESC, MAX(r.created_at) DESC
+            LIMIT ?"
+        );
+        params.push(Box::new(limit as i64));
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(param_refs.as_slice(), |row| {
+            Ok(SessionStats {
+                app_type: row.get(0)?,
+                session_id: row.get(1)?,
+                title: row.get(2)?,
+                project: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                model: row.get(4)?,
+                request_count: row.get::<_, i64>(5)?.max(0) as u64,
+                total_tokens: row.get::<_, i64>(6)?.max(0) as u64,
+                cache_read_tokens: row.get::<_, i64>(7)?.max(0) as u64,
+                total_cost: format!("{:.6}", row.get::<_, f64>(8)?),
+                first_at: row.get(9)?,
+                last_at: row.get(10)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    }
+
+    /// 按「星期 × 小时」汇总活动量（本地时间）
+    pub fn get_hourly_activity(
+        &self,
+        start_date: Option<i64>,
+        end_date: Option<i64>,
+        app_type: Option<&str>,
+        project: Option<&str>,
+        model: Option<&str>,
+    ) -> Result<Vec<HourlyActivity>, AppError> {
+        let conn = lock_conn!(self.conn);
+        let (where_clause, params) =
+            Self::detail_where(&conn, start_date, end_date, app_type, project, model)?;
+        let fresh_input = fresh_input_sql("l");
+        // strftime('%w') 周日为 0；换成周一为 0
+        let sql = format!(
+            "SELECT (CAST(strftime('%w', l.created_at, 'unixepoch', 'localtime') AS INTEGER) + 6) % 7,
+                    CAST(strftime('%H', l.created_at, 'unixepoch', 'localtime') AS INTEGER),
+                    COUNT(*),
+                    COALESCE(SUM({fresh_input} + l.output_tokens), 0),
+                    COALESCE(SUM(CAST(l.total_cost_usd AS REAL)), 0)
+             FROM proxy_request_logs l
+             {where_clause}
+             GROUP BY 1, 2
+             ORDER BY 1, 2"
+        );
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(param_refs.as_slice(), |row| {
+            Ok(HourlyActivity {
+                weekday: row.get::<_, i64>(0)?.clamp(0, 6) as u8,
+                hour: row.get::<_, i64>(1)?.clamp(0, 23) as u8,
+                request_count: row.get::<_, i64>(2)?.max(0) as u64,
+                total_tokens: row.get::<_, i64>(3)?.max(0) as u64,
+                total_cost: format!("{:.6}", row.get::<_, f64>(4)?),
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+    }
+
+    /// 某个时间段的总花费（美元），预算提醒和托盘用
+    pub fn total_cost_between(&self, start_date: i64, end_date: i64) -> Result<f64, AppError> {
+        let summary = self.get_usage_summary(Some(start_date), Some(end_date), None, None, None)?;
+        Ok(summary.total_cost.parse::<f64>().unwrap_or(0.0))
+    }
 }
 
 #[derive(Clone)]
@@ -2099,13 +1971,13 @@ impl Database {
         only_model_id: Option<&str>,
     ) -> Result<u64, AppError> {
         const BASE_SQL: &str =
-            "SELECT request_id, provider_id, NULL AS provider_name, app_type, model, request_model,
+            "SELECT request_id, provider_id, project, app_type, model, request_model,
                         cost_multiplier,
                         input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
                         input_cost_usd, output_cost_usd, cache_read_cost_usd,
                         cache_creation_cost_usd, total_cost_usd, is_streaming, latency_ms,
                         first_token_ms, duration_ms, status_code, error_message, created_at,
-                        data_source, pricing_model, input_token_semantics
+                        data_source, pricing_model, input_token_semantics, session_id
              FROM proxy_request_logs
              WHERE CAST(total_cost_usd AS REAL) <= 0
                AND (input_tokens > 0 OR output_tokens > 0
@@ -2477,7 +2349,7 @@ fn clean_model_id_for_pricing(model_id: &str) -> String {
         .to_ascii_lowercase();
 
     normalized
-        .trim_end_matches(crate::claude_desktop_config::ONE_M_CONTEXT_MARKER)
+        .trim_end_matches(ONE_M_CONTEXT_MARKER)
         .trim()
         .to_string()
 }
@@ -3915,13 +3787,6 @@ mod tests {
 
         {
             let conn = lock_conn!(db.conn);
-            // providers 也有 created_at / cost_multiplier 列：详情查询的列必须带表别名，
-            // 否则 SQLite 报 ambiguous column name，整个命令失败。
-            conn.execute(
-                "INSERT INTO providers (id, app_type, name, settings_config, created_at) VALUES
-                 ('prov-a', 'claude', 'Packy', '{}', 1)",
-                [],
-            )?;
             insert_usage_log(
                 &conn,
                 "a-1",
@@ -3952,17 +3817,23 @@ mod tests {
                 200,
                 "0.5",
             )?;
+            conn.execute(
+                "UPDATE proxy_request_logs SET project = '/work/app', session_id = 'sess-1'
+                 WHERE request_id = 'session:msg_1'",
+                [],
+            )?;
         }
 
         let proxy = db.get_request_detail("a-1")?.expect("proxy row");
-        assert_eq!(proxy.provider_name.as_deref(), Some("Packy"));
+        assert_eq!(proxy.project.as_deref(), Some(""));
         assert_eq!(proxy.created_at, ts);
         assert_eq!(proxy.input_tokens, 100);
 
         let session = db
             .get_request_detail("session:msg_1")?
             .expect("session row");
-        assert_eq!(session.provider_name.as_deref(), Some("Claude (Session)"));
+        assert_eq!(session.project.as_deref(), Some("/work/app"));
+        assert_eq!(session.session_id.as_deref(), Some("sess-1"));
         assert_eq!(session.created_at, ts);
 
         assert!(db.get_request_detail("missing")?.is_none());
@@ -3971,106 +3842,88 @@ mod tests {
     }
 
     #[test]
-    fn test_provider_and_model_filters_cover_detail_and_rollup() -> Result<(), AppError> {
+    fn test_project_and_model_filters_cover_detail_and_rollup() -> Result<(), AppError> {
         let db = Database::memory()?;
         let detail_ts = local_ts(2026, 6, 10, 12, 0, 0);
 
         {
             let conn = lock_conn!(db.conn);
-            conn.execute(
-                "INSERT INTO providers (id, app_type, name, settings_config) VALUES
-                 ('prov-a', 'claude', 'Packy', '{}'),
-                 ('prov-b', 'claude', 'DeepSeek', '{}')",
-                [],
-            )?;
-
-            insert_usage_log(
-                &conn,
-                "a-1",
-                "claude",
-                "prov-a",
-                "claude-sonnet-4-6",
-                "proxy",
-                detail_ts,
-                100,
-                10,
-                0,
-                0,
-                200,
-                "1.0",
-            )?;
-            insert_usage_log(
-                &conn,
-                "b-1",
-                "claude",
-                "prov-b",
-                "deepseek-v3",
-                "proxy",
-                detail_ts,
-                200,
-                20,
-                0,
-                0,
-                200,
-                "2.0",
-            )?;
-            // 会话占位行：providers 表无此 id，展示名走 CASE 映射。
-            insert_usage_log(
-                &conn,
-                "s-1",
-                "claude",
-                "_session",
-                "claude-sonnet-4-6",
-                "session_log",
-                detail_ts,
-                999,
-                99,
-                0,
-                0,
-                200,
-                "0.5",
-            )?;
+            for (id, app, model, input, cost, project, session) in [
+                (
+                    "a-1",
+                    "claude",
+                    "claude-sonnet-4-6",
+                    100,
+                    "1.0",
+                    "/work/app",
+                    "s-a",
+                ),
+                ("b-1", "codex", "gpt-5.5", 200, "2.0", "/work/lib", "s-b"),
+                (
+                    "s-1",
+                    "claude",
+                    "claude-sonnet-4-6",
+                    999,
+                    "0.5",
+                    "/work/lib",
+                    "s-c",
+                ),
+                (
+                    "a-2",
+                    "claude",
+                    "alias-model",
+                    50,
+                    "0.3",
+                    "/work/app",
+                    "s-a",
+                ),
+            ] {
+                insert_usage_log(
+                    &conn,
+                    id,
+                    app,
+                    "_session",
+                    model,
+                    "session_log",
+                    detail_ts,
+                    input,
+                    10,
+                    0,
+                    0,
+                    200,
+                    cost,
+                )?;
+                conn.execute(
+                    "UPDATE proxy_request_logs SET project = ?1, session_id = ?2 WHERE request_id = ?3",
+                    rusqlite::params![project, session, id],
+                )?;
+            }
             // 计价模型与请求模型不同的行：模型筛选必须按有效计价模型命中。
-            insert_usage_log(
-                &conn,
-                "a-2",
-                "claude",
-                "prov-a",
-                "alias-model",
-                "proxy",
-                detail_ts,
-                50,
-                5,
-                0,
-                0,
-                200,
-                "0.3",
-            )?;
             conn.execute(
                 "UPDATE proxy_request_logs SET pricing_model = 'real-model' WHERE request_id = 'a-2'",
                 [],
             )?;
 
-            // rollup 历史日行：无范围过滤时全部计入。
+            // rollup 历史日行：无范围过滤时全部计入，项目维度保留。
             conn.execute(
                 "INSERT INTO usage_daily_rollups (
-                    date, app_type, provider_id, model,
+                    date, app_type, provider_id, model, project,
                     request_count, success_count, input_tokens, output_tokens,
                     cache_read_tokens, cache_creation_tokens, total_cost_usd, avg_latency_ms
                 ) VALUES
-                ('2026-06-08', 'claude', 'prov-a', 'claude-sonnet-4-6', 5, 5, 500, 50, 0, 0, '5.0', 100),
-                ('2026-06-08', 'claude', 'prov-b', 'deepseek-v3', 7, 7, 700, 70, 0, 0, '7.0', 100)",
+                ('2026-06-08', 'claude', '_session', 'claude-sonnet-4-6', '/work/app', 5, 5, 500, 50, 0, 0, '5.0', 100),
+                ('2026-06-08', 'codex', '_codex_session', 'gpt-5.5', '/work/lib', 7, 7, 700, 70, 0, 0, '7.0', 100)",
                 [],
             )?;
         }
 
-        // ① 汇总按 Provider 展示名过滤：明细 + rollup 都命中。
-        let packy = db.get_usage_summary(None, None, None, Some("Packy"), None)?;
-        assert_eq!(packy.total_requests, 7, "a-1 + a-2 + rollup 5");
+        // ① 汇总按项目过滤：明细 + rollup 都命中。
+        let app = db.get_usage_summary(None, None, None, Some("/work/app"), None)?;
+        assert_eq!(app.total_requests, 7, "a-1 + a-2 + rollup 5");
 
         // ② 汇总按模型过滤（有效计价模型口径）。
-        let deepseek = db.get_usage_summary(None, None, None, None, Some("deepseek-v3"))?;
-        assert_eq!(deepseek.total_requests, 8, "b-1 + rollup 7");
+        let gpt = db.get_usage_summary(None, None, None, None, Some("gpt-5.5"))?;
+        assert_eq!(gpt.total_requests, 8, "b-1 + rollup 7");
 
         // ③ pricing_model 优先于 model：alias-model 查不到，real-model 查得到。
         let by_alias = db.get_usage_summary(None, None, None, None, Some("alias-model"))?;
@@ -4078,25 +3931,33 @@ mod tests {
         let by_real = db.get_usage_summary(None, None, None, None, Some("real-model"))?;
         assert_eq!(by_real.total_requests, 1);
 
-        // ④ 会话占位行可按可读名选中。
-        let session = db.get_usage_summary(None, None, None, Some("Claude (Session)"), None)?;
-        assert_eq!(session.total_requests, 1);
+        // ④ 项目统计：按花费排序，Claude / Codex 花费分开，会话数只数明细。
+        let projects = db.get_project_stats(None, None, None, None, None)?;
+        assert_eq!(projects.len(), 2);
+        assert_eq!(projects[0].project, "/work/lib");
+        assert_eq!(projects[0].request_count, 9);
+        assert_eq!(projects[0].total_cost, format!("{:.6}", 9.5));
+        assert_eq!(projects[0].codex_cost, format!("{:.6}", 9.0));
+        assert_eq!(projects[0].claude_cost, format!("{:.6}", 0.5));
+        assert_eq!(projects[0].session_count, 2);
+        assert_eq!(projects[1].project, "/work/app");
+        assert_eq!(projects[1].session_count, 1);
 
-        // ⑤ Provider 统计 + 模型过滤：只剩 DeepSeek 一行。
-        let provider_stats = db.get_provider_stats(None, None, None, None, Some("deepseek-v3"))?;
-        assert_eq!(provider_stats.len(), 1);
-        assert_eq!(provider_stats[0].provider_name, "DeepSeek");
-        assert_eq!(provider_stats[0].request_count, 8);
+        // ⑤ 项目统计 + 模型过滤。
+        let filtered = db.get_project_stats(None, None, None, None, Some("gpt-5.5"))?;
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].project, "/work/lib");
+        assert_eq!(filtered[0].request_count, 8);
 
-        // ⑥ 模型统计 + Provider 过滤：只剩 Packy 名下的模型。
-        let model_stats = db.get_model_stats(None, None, None, Some("Packy"), None)?;
+        // ⑥ 模型统计 + 项目过滤：只剩该项目的模型。
+        let model_stats = db.get_model_stats(None, None, None, Some("/work/app"), None)?;
         let models: Vec<&str> = model_stats.iter().map(|m| m.model.as_str()).collect();
         assert!(models.contains(&"claude-sonnet-4-6"));
         assert!(models.contains(&"real-model"));
-        assert!(!models.contains(&"deepseek-v3"));
+        assert!(!models.contains(&"gpt-5.5"));
 
-        // ⑦ 分应用汇总（Hero 卡片数据源）同样受过滤影响。
-        let by_app = db.get_usage_summary_by_app(None, None, Some("Packy"), None)?;
+        // ⑦ 分应用汇总同样受过滤影响。
+        let by_app = db.get_usage_summary_by_app(None, None, Some("/work/app"), None)?;
         assert_eq!(by_app.len(), 1);
         assert_eq!(by_app[0].app_type, "claude");
         assert_eq!(by_app[0].summary.total_requests, 7);
@@ -4104,28 +3965,28 @@ mod tests {
         // ⑧ 趋势（>24h 走天分桶 + rollup 分支）。
         let t_start = local_ts(2026, 6, 8, 0, 0, 0);
         let t_end = local_ts(2026, 6, 10, 23, 59, 0);
-        let trends = db.get_daily_trends(Some(t_start), Some(t_end), None, Some("Packy"), None)?;
+        let trends =
+            db.get_daily_trends(Some(t_start), Some(t_end), None, Some("/work/app"), None)?;
         let total_req: u64 = trends.iter().map(|d| d.request_count).sum();
         assert_eq!(total_req, 7, "明细 2 + rollup 5");
 
-        // ⑨ 趋势 ≤24h 走小时分桶分支（?1/?2/?3 编号参数与追加过滤混用的路径），
-        //    同时验证 Provider + 模型组合过滤。
+        // ⑨ 趋势 ≤24h 走小时分桶分支，项目 + 模型组合过滤。
         let h_start = local_ts(2026, 6, 10, 0, 0, 0);
         let h_end = local_ts(2026, 6, 10, 20, 0, 0);
         let hourly = db.get_daily_trends(
             Some(h_start),
             Some(h_end),
             None,
-            Some("Packy"),
+            Some("/work/app"),
             Some("claude-sonnet-4-6"),
         )?;
         let hourly_req: u64 = hourly.iter().map(|d| d.request_count).sum();
         assert_eq!(hourly_req, 1, "仅 a-1 命中（a-2 计价模型不同）");
 
-        // ⑩ 请求日志列表与下拉同口径：精确名 + 有效计价模型。
+        // ⑩ 请求日志列表：项目 + 有效计价模型，会话过滤。
         let logs = db.get_request_logs(
             &LogFilters {
-                provider_name: Some("Packy".to_string()),
+                project: Some("/work/app".to_string()),
                 model: Some("real-model".to_string()),
                 ..Default::default()
             },
@@ -4134,6 +3995,42 @@ mod tests {
         )?;
         assert_eq!(logs.total, 1);
         assert_eq!(logs.data[0].request_id, "a-2");
+        let by_session = db.get_request_logs(
+            &LogFilters {
+                session_id: Some("s-a".to_string()),
+                ..Default::default()
+            },
+            0,
+            10,
+        )?;
+        assert_eq!(by_session.total, 2);
+
+        // ⑪ 会话统计：标题、主模型、花费排序。
+        {
+            let conn = lock_conn!(db.conn);
+            conn.execute(
+                "INSERT INTO session_titles (app_type, session_id, title) VALUES ('claude', 's-a', 'Fix login')",
+                [],
+            )?;
+        }
+        let sessions = db.get_session_stats(None, None, None, None, None, 10)?;
+        assert_eq!(sessions.len(), 3);
+        assert_eq!(sessions[0].session_id, "s-b");
+        assert_eq!(sessions[0].app_type, "codex");
+        let s_a = sessions
+            .iter()
+            .find(|s| s.session_id == "s-a")
+            .expect("s-a");
+        assert_eq!(s_a.title.as_deref(), Some("Fix login"));
+        assert_eq!(s_a.request_count, 2);
+        assert_eq!(s_a.project, "/work/app");
+
+        // ⑫ 星期 × 小时：明细的本地时间落在 2026-06-10（周三）12 点。
+        let activity = db.get_hourly_activity(None, None, None, None, None)?;
+        assert_eq!(activity.len(), 1);
+        assert_eq!(activity[0].weekday, 2);
+        assert_eq!(activity[0].hour, 12);
+        assert_eq!(activity[0].request_count, 4);
 
         Ok(())
     }
@@ -4330,23 +4227,14 @@ mod tests {
         let trends = db.get_daily_trends(Some(0), Some(40_000), None, None, None)?;
         assert_eq!(trends.iter().map(|stat| stat.request_count).sum::<u64>(), 4);
 
-        let provider_stats = db.get_provider_stats(None, None, None, None, None)?;
+        let project_stats = db.get_project_stats(None, None, None, None, None)?;
         assert_eq!(
-            provider_stats
+            project_stats
                 .iter()
                 .map(|stat| stat.request_count)
                 .sum::<u64>(),
             4
         );
-        assert!(provider_stats
-            .iter()
-            .any(|stat| stat.provider_id == "_codex_session" && stat.request_count == 1));
-        assert!(!provider_stats
-            .iter()
-            .any(|stat| stat.provider_id == "_gemini_session"));
-        assert!(!provider_stats
-            .iter()
-            .any(|stat| stat.provider_id == "_session"));
 
         let model_stats = db.get_model_stats(None, None, None, None, None)?;
         assert_eq!(
@@ -4597,7 +4485,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_provider_stats_with_time_filter() -> Result<(), AppError> {
+    fn test_get_project_stats_with_time_filter() -> Result<(), AppError> {
         let db = Database::memory()?;
 
         {
@@ -4620,131 +4508,18 @@ mod tests {
             )?;
         }
 
-        let stats = db.get_provider_stats(Some(1500), Some(2500), Some("claude"), None, None)?;
+        let stats = db.get_project_stats(Some(1500), Some(2500), Some("claude"), None, None)?;
         assert_eq!(stats.len(), 1);
-        assert_eq!(stats[0].provider_id, "p1");
+        assert_eq!(stats[0].project, "");
         assert_eq!(stats[0].request_count, 1);
         assert_eq!(stats[0].total_tokens, 275);
+        assert_eq!(stats[0].last_active_at, 2000);
 
         Ok(())
     }
 
     #[test]
-    fn test_get_provider_stats_speed_sums_only_eligible_requests() -> Result<(), AppError> {
-        let db = Database::memory()?;
-
-        {
-            let conn = lock_conn!(db.conn);
-            let insert = |id: &str, output: i64, latency: i64, first: Option<i64>| {
-                conn.execute(
-                    "INSERT INTO proxy_request_logs (
-                        request_id, provider_id, app_type, model,
-                        input_tokens, output_tokens, total_cost_usd,
-                        latency_ms, first_token_ms, status_code, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    params![id, "p1", "claude", "m", 10, output, "0", latency, first, 200, 1000],
-                )
-            };
-            // 计入：1000 token / (11000 - 1000) ms
-            insert("ok-a", 1000, 11_000, Some(1_000))?;
-            // 计入：300 token / (4000 - 1000) ms
-            insert("ok-b", 300, 4_000, Some(1_000))?;
-            // 不计：输出不到 100
-            insert("short", 50, 2_000, Some(100))?;
-            // 不计：没有首字（会话日志 / 非流式）
-            insert("no-ttft", 5_000, 9_000, None)?;
-            // 不计：耗时不大于首字
-            insert("zero-gen", 500, 1_000, Some(1_000))?;
-            // 不计：生成窗口不到 100ms，是传输突发
-            insert("burst", 500, 1_050, Some(1_000))?;
-        }
-
-        let stats = db.get_provider_stats(None, None, None, None, None)?;
-        assert_eq!(stats.len(), 1);
-        assert_eq!(stats[0].request_count, 6);
-        assert_eq!(stats[0].speed_output_tokens, 1_300);
-        assert_eq!(stats[0].speed_generation_ms, 13_000);
-        // 路由服务的行没有首字（非流式）也不算估算速度
-        assert_eq!(stats[0].est_speed_output_tokens, 0);
-        assert_eq!(stats[0].est_speed_duration_ms, 0);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_get_provider_stats_estimated_speed_sums_session_rows() -> Result<(), AppError> {
-        let db = Database::memory()?;
-
-        {
-            let conn = lock_conn!(db.conn);
-            let insert = |id: &str, output: i64, latency: i64, source: &str| {
-                conn.execute(
-                    "INSERT INTO proxy_request_logs (
-                        request_id, provider_id, app_type, model,
-                        input_tokens, output_tokens, total_cost_usd,
-                        latency_ms, status_code, created_at, data_source
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    params![
-                        id, "_session", "claude", "m", 10, output, "0", latency, 200, 1000, source
-                    ],
-                )
-            };
-            // 计入：2000 token / 20000 ms
-            insert("ok-a", 2_000, 20_000, "session_log")?;
-            // 计入：500 token / 5000 ms
-            insert("ok-b", 200, 5_000, "session_log")?;
-            // 不计：输出不到 200
-            insert("short", 199, 5_000, "session_log")?;
-            // 不计：没估出耗时
-            insert("no-timing", 3_000, 0, "session_log")?;
-            // 不计：耗时不到 1 秒
-            insert("too-fast", 800, 900, "session_log")?;
-        }
-
-        let stats = db.get_provider_stats(None, None, None, None, None)?;
-        assert_eq!(stats.len(), 1);
-        assert_eq!(stats[0].est_speed_output_tokens, 2_200);
-        assert_eq!(stats[0].est_speed_duration_ms, 25_000);
-        // 估算的不混进精确口径
-        assert_eq!(stats[0].speed_output_tokens, 0);
-        assert_eq!(stats[0].speed_generation_ms, 0);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_get_provider_stats_labels_opencode_session_provider() -> Result<(), AppError> {
-        let db = Database::memory()?;
-
-        {
-            let conn = lock_conn!(db.conn);
-            insert_usage_log(
-                &conn,
-                "opencode-session",
-                "opencode",
-                "_opencode_session",
-                "opencode-model",
-                "opencode_session",
-                1000,
-                100,
-                50,
-                0,
-                0,
-                200,
-                "0.01",
-            )?;
-        }
-
-        let stats = db.get_provider_stats(None, None, Some("opencode"), None, None)?;
-        assert_eq!(stats.len(), 1);
-        assert_eq!(stats[0].provider_id, "_opencode_session");
-        assert_eq!(stats[0].provider_name, "OpenCode (Session)");
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_get_provider_stats_excludes_partial_rollup_boundary_days() -> Result<(), AppError> {
+    fn test_get_project_stats_excludes_partial_rollup_boundary_days() -> Result<(), AppError> {
         let db = Database::memory()?;
         let start = local_ts(2024, 2, 1, 12, 0, 0);
         let end = local_ts(2024, 2, 3, 12, 0, 0);
@@ -4816,9 +4591,8 @@ mod tests {
             )?;
         }
 
-        let stats = db.get_provider_stats(Some(start), Some(end), Some("claude"), None, None)?;
+        let stats = db.get_project_stats(Some(start), Some(end), Some("claude"), None, None)?;
         assert_eq!(stats.len(), 1);
-        assert_eq!(stats[0].provider_id, "p-rollup");
         assert_eq!(stats[0].request_count, 8);
         assert_eq!(stats[0].total_tokens, 1200);
 

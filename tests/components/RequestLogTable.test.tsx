@@ -134,8 +134,8 @@ describe("RequestLogTable", () => {
 
   it("shows exact speed for routed requests and an estimate for timed session logs", () => {
     const base = {
-      providerId: "p1",
-      providerName: "DeepSeek",
+      providerId: "_codex_session",
+      project: "/work/app",
       appType: "codex",
       model: "deepseek-v4-pro",
       costMultiplier: "1",
@@ -225,14 +225,14 @@ describe("RequestLogTable", () => {
     expect(onOpenDetail).toHaveBeenCalledWith("short");
   });
 
-  it("shows full provider names on hover and short app names in the app column", () => {
+  it("shows project names with full paths on hover and short app names", () => {
     useRequestLogsMock.mockReturnValue({
       data: {
         data: [
           {
             requestId: "r1",
-            providerId: "p1",
-            providerName: "Kimi For Coding Plan Provider",
+            providerId: "_session",
+            project: "/Users/me/code/kimi-coding-plan",
             appType: "claude",
             model: "kimi-k2.6",
             costMultiplier: "1",
@@ -262,13 +262,13 @@ describe("RequestLogTable", () => {
       <RequestLogTable range={{ preset: "today" }} refreshIntervalMs={0} />,
     );
 
-    expect(
-      screen.getByTitle("Kimi For Coding Plan Provider"),
-    ).toHaveTextContent("Kimi For Coding Plan Provider");
+    expect(screen.getByTitle("~/code/kimi-coding-plan")).toHaveTextContent(
+      "kimi-coding-plan",
+    );
     // 应用列：短名 + 全名在悬停提示和读屏文字里
     const appCell = screen.getByTitle("Claude Code");
     expect(appCell).toHaveTextContent("Claude");
-    expect(appShortName("claude-desktop")).toBe("Desktop");
+    expect(appShortName("claude-desktop")).toBe("Claude");
     expect(appShortName("unknown-app")).toBe("unknown-app");
   });
 });

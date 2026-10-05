@@ -4,15 +4,13 @@
     "windows": [
       {
         "label": "main",
-        "title": "CC Switch",
+        "title": "Pigger Switch",
         "titleBarStyle": "Visible",
-        "decorations": false,
-        "shadow": true,
         "visible": false,
         "width": 1100,
-        "height": 650,
-        "minWidth": 1000,
-        "minHeight": 640,
+        "height": 720,
+        "minWidth": 820,
+        "minHeight": 560,
         "resizable": true,
         "fullscreen": false,
         "center": true

@@ -19,8 +19,9 @@ vi.mock("@/lib/query/usage", () => ({
 
 const log = (overrides: Partial<RequestLog>): RequestLog => ({
   requestId: "req_1",
-  providerId: "p1",
-  providerName: "GitHub Copilot",
+  providerId: "_session",
+  project: "/work/app",
+  sessionId: "sess-1",
   appType: "claude",
   model: "claude-opus-5-5",
   costMultiplier: "1",

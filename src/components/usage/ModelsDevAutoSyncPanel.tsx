@@ -523,7 +523,7 @@ export function ModelsDevAutoSyncPanel() {
 
   const openLocalFileFolder = async () => {
     try {
-      await settingsApi.openAppConfigFolder();
+      await settingsApi.openDataDir();
     } catch (openError) {
       toast.error(
         t("usage.modelsDevAutoSync.openFolderFailed", {

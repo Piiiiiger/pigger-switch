@@ -28,24 +28,12 @@ function interpolationVariables(value: string): string[] {
   ).sort();
 }
 
+/** 复数形式的键在各语言里不一样多（日语只有 _other），比较时归到同一个基础键 */
+const pluralBase = (key: string) =>
+  key.replace(/_(zero|one|two|few|many|other)$/, "");
+
 const reference = flattenStrings(en);
-const piKeysOutsideNamespace = new Set([
-  "apps.pi",
-  "deeplink.api",
-  "sessionManager.piDiscoveryUnavailable",
-  "sessionManager.piRelativeSessionDir",
-  "settings.browsePlaceholderPi",
-  "settings.piConfigDir",
-  "settings.piConfigDirDescription",
-]);
-const piReference = new Map(
-  [...reference].filter(
-    ([key]) => key.startsWith("pi.") || piKeysOutsideNamespace.has(key),
-  ),
-);
-const piProductReferences = new Map(
-  [...reference].filter(([, value]) => /\bPi\b/.test(value)),
-);
+const referenceBases = new Set([...reference.keys()].map(pluralBase));
 const locales = [
   ["zh", zh],
   ["ja", ja],
@@ -53,42 +41,38 @@ const locales = [
 ] as const;
 
 describe("locale coverage", () => {
-  it.each(locales)("covers every Pi translation key in %s", (_name, tree) => {
+  it.each(locales)("covers every English key in %s", (_name, tree) => {
     const translations = flattenStrings(tree as TranslationTree);
-    const missing = [...piReference.keys()].filter(
-      (key) => !translations.has(key),
-    );
-
+    const bases = new Set([...translations.keys()].map(pluralBase));
+    const missing = [...referenceBases].filter((key) => !bases.has(key));
+    const extra = [...bases].filter((key) => !referenceBases.has(key));
     expect(missing).toEqual([]);
+    expect(extra).toEqual([]);
   });
 
-  it.each(locales)(
-    "preserves every Pi interpolation variable in %s",
-    (_name, tree) => {
-      const translations = flattenStrings(tree as TranslationTree);
-      const mismatched = [...piReference].flatMap(([key, expected]) => {
-        const actual = translations.get(key);
-        return actual !== undefined &&
-          interpolationVariables(actual).join("\0") !==
-            interpolationVariables(expected).join("\0")
-          ? [key]
-          : [];
-      });
+  it.each(locales)("keeps every interpolation variable in %s", (_name, tree) => {
+    const translations = flattenStrings(tree as TranslationTree);
+    const mismatched = [...reference].flatMap(([key, expected]) => {
+      const actual = translations.get(key);
+      return actual !== undefined &&
+        interpolationVariables(actual).join("\0") !==
+          interpolationVariables(expected).join("\0")
+        ? [key]
+        : [];
+    });
+    expect(mismatched).toEqual([]);
+  });
 
-      expect(mismatched).toEqual([]);
-    },
-  );
-
-  it.each(locales)(
-    "preserves explicit Pi product mentions in %s",
-    (_name, tree) => {
-      const translations = flattenStrings(tree as TranslationTree);
-      const missingMentions = [...piProductReferences.keys()].filter((key) => {
-        const actual = translations.get(key);
-        return actual === undefined || !/\bPi\b/.test(actual);
-      });
-
-      expect(missingMentions).toEqual([]);
-    },
-  );
+  it("never mentions the old product as if it were this app", () => {
+    const offenders = [en, zh, ja, zhTW].flatMap((tree) =>
+      [...flattenStrings(tree as TranslationTree)].filter(
+        ([key, value]) =>
+          /CC Switch/.test(value) &&
+          !key.startsWith("settings.import.") &&
+          key !== "usage.detail.sourceProxy" &&
+          key !== "usage.speedHelp",
+      ),
+    );
+    expect(offenders).toEqual([]);
+  });
 });

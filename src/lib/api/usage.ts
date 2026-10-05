@@ -3,65 +3,34 @@ import type {
   UsageSummary,
   UsageSummaryByApp,
   DailyStats,
-  ProviderStats,
+  ProjectStats,
   ModelStats,
+  SessionStats,
+  HourlyActivity,
+  BudgetStatus,
   RequestLog,
   LogFilters,
   ModelPricing,
   ModelsDevSyncConfig,
   ModelsDevSyncState,
-  ProviderLimitStatus,
   PaginatedLogs,
   SessionSyncResult,
   DataSourceSummary,
 } from "@/types/usage";
-import type { UsageResult } from "@/types";
-import type { AppId } from "./types";
-import type { TemplateType } from "@/config/constants";
 
 export const usageApi = {
-  // Provider usage script methods
-  query: async (providerId: string, appId: AppId): Promise<UsageResult> => {
-    return invoke("queryProviderUsage", { providerId, app: appId });
-  },
-
-  testScript: async (
-    providerId: string,
-    appId: AppId,
-    scriptCode: string,
-    timeout?: number,
-    apiKey?: string,
-    baseUrl?: string,
-    accessToken?: string,
-    userId?: string,
-    templateType?: TemplateType,
-  ): Promise<UsageResult> => {
-    return invoke("testUsageScript", {
-      providerId,
-      app: appId,
-      scriptCode,
-      timeout,
-      apiKey,
-      baseUrl,
-      accessToken,
-      userId,
-      templateType,
-    });
-  },
-
-  // Proxy usage statistics methods
   getUsageSummary: async (
     startDate?: number,
     endDate?: number,
     appType?: string,
-    providerName?: string,
+    project?: string,
     model?: string,
   ): Promise<UsageSummary> => {
     return invoke("get_usage_summary", {
       startDate,
       endDate,
       appType,
-      providerName,
+      project,
       model,
     });
   },
@@ -76,13 +45,13 @@ export const usageApi = {
   getUsageSummaryByApp: async (
     startDate?: number,
     endDate?: number,
-    providerName?: string,
+    project?: string,
     model?: string,
   ): Promise<UsageSummaryByApp[]> => {
     return invoke("get_usage_summary_by_app", {
       startDate,
       endDate,
-      providerName,
+      project,
       model,
     });
   },
@@ -91,30 +60,30 @@ export const usageApi = {
     startDate?: number,
     endDate?: number,
     appType?: string,
-    providerName?: string,
+    project?: string,
     model?: string,
   ): Promise<DailyStats[]> => {
     return invoke("get_usage_trends", {
       startDate,
       endDate,
       appType,
-      providerName,
+      project,
       model,
     });
   },
 
-  getProviderStats: async (
+  getProjectStats: async (
     startDate?: number,
     endDate?: number,
     appType?: string,
-    providerName?: string,
+    project?: string,
     model?: string,
-  ): Promise<ProviderStats[]> => {
-    return invoke("get_provider_stats", {
+  ): Promise<ProjectStats[]> => {
+    return invoke("get_project_stats", {
       startDate,
       endDate,
       appType,
-      providerName,
+      project,
       model,
     });
   },
@@ -123,16 +92,54 @@ export const usageApi = {
     startDate?: number,
     endDate?: number,
     appType?: string,
-    providerName?: string,
+    project?: string,
     model?: string,
   ): Promise<ModelStats[]> => {
     return invoke("get_model_stats", {
       startDate,
       endDate,
       appType,
-      providerName,
+      project,
       model,
     });
+  },
+
+  getSessionStats: async (
+    startDate?: number,
+    endDate?: number,
+    appType?: string,
+    project?: string,
+    model?: string,
+    limit?: number,
+  ): Promise<SessionStats[]> => {
+    return invoke("get_session_stats", {
+      startDate,
+      endDate,
+      appType,
+      project,
+      model,
+      limit,
+    });
+  },
+
+  getHourlyActivity: async (
+    startDate?: number,
+    endDate?: number,
+    appType?: string,
+    project?: string,
+    model?: string,
+  ): Promise<HourlyActivity[]> => {
+    return invoke("get_hourly_activity", {
+      startDate,
+      endDate,
+      appType,
+      project,
+      model,
+    });
+  },
+
+  getBudgetStatus: async (): Promise<BudgetStatus> => {
+    return invoke("get_budget_status");
   },
 
   getRequestLogs: async (
@@ -196,13 +203,6 @@ export const usageApi = {
 
   deleteModelPricing: async (modelId: string): Promise<void> => {
     return invoke("delete_model_pricing", { modelId });
-  },
-
-  checkProviderLimits: async (
-    providerId: string,
-    appType: string,
-  ): Promise<ProviderLimitStatus> => {
-    return invoke("check_provider_limits", { providerId, appType });
   },
 
   // Session usage sync

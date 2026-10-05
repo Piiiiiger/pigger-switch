@@ -10,9 +10,6 @@ export interface QuotaTier {
   name: string;
   utilization: number; // 0-100
   resetsAt: string | null;
-  usedValueUsd?: number | null;
-  maxValueUsd?: number | null;
-  planLabel?: string | null;
 }
 
 export interface ExtraUsage {
@@ -28,6 +25,14 @@ export interface ResetCredits {
   expiresAt: (string | null)[];
 }
 
+export interface SubscriptionPlan {
+  /** 小写原值：pro / max / plus / team … */
+  id: string;
+  /** 展示名：Max 5x / Plus … */
+  label: string;
+  activeUntil?: string | null;
+}
+
 export interface SubscriptionQuota {
   tool: string;
   credentialStatus: CredentialStatus;
@@ -37,6 +42,9 @@ export interface SubscriptionQuota {
   extraUsage: ExtraUsage | null;
   /** 只有 ChatGPT 订阅有；没查到时缺省 */
   resetCredits?: ResetCredits | null;
+  plan?: SubscriptionPlan | null;
   error: string | null;
   queriedAt: number | null;
 }
+
+export type QuotaTool = "claude" | "codex";

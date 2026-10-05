@@ -5,14 +5,16 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { UsageDashboard } from "@/components/usage/UsageDashboard";
 
 /**
- * 不 mock 子组件，把整页（指标、趋势图、四个页签）真渲染一遍，接口用假数据。
+ * 不 mock 子组件，把整页（指标、趋势图、各个页签）真渲染一遍，接口用假数据。
  */
 
 const usageApiMock = vi.hoisted(() => ({
   getUsageSummary: vi.fn(),
   getUsageSummaryByApp: vi.fn(),
   getUsageTrends: vi.fn(),
-  getProviderStats: vi.fn(),
+  getProjectStats: vi.fn(),
+  getSessionStats: vi.fn(),
+  getHourlyActivity: vi.fn(),
   getModelStats: vi.fn(),
   getRequestLogs: vi.fn(),
   getRequestDetail: vi.fn(),
@@ -43,11 +45,8 @@ vi.mock("@/hooks/useUsageEventBridge", () => ({
 
 vi.mock("@/lib/api/usage", () => ({ usageApi: usageApiMock }));
 
-vi.mock("@/lib/api/proxy", () => ({
-  proxyApi: {
-    getPricingModelSource: vi.fn().mockResolvedValue("response"),
-    setPricingModelSource: vi.fn().mockResolvedValue(undefined),
-  },
+vi.mock("@/lib/query/subscription", () => ({
+  useSubscriptionQuota: () => ({ data: undefined }),
 }));
 
 const summary = {
@@ -80,17 +79,40 @@ describe("UsageDashboard (smoke)", () => {
         totalCacheReadTokens: 1_640_000,
       },
     ]);
-    usageApiMock.getProviderStats.mockResolvedValue([
+    usageApiMock.getProjectStats.mockResolvedValue([
       {
-        providerId: "p1",
-        providerName: "DeepSeek",
+        project: "/home/me/code/pigger-switch",
         requestCount: 720,
         totalTokens: 4_300_000,
         totalCost: "6.1",
-        successRate: 99.4,
-        avgLatencyMs: 9000,
-        speedOutputTokens: 92_000,
-        speedGenerationMs: 1_000_000,
+        claudeCost: "4.1",
+        codexCost: "2.0",
+        sessionCount: 12,
+        lastActiveAt: Math.floor(Date.now() / 1000) - 120,
+      },
+    ]);
+    usageApiMock.getSessionStats.mockResolvedValue([
+      {
+        appType: "claude",
+        sessionId: "11111111-2222-3333-4444-555555555555",
+        title: "Fix the login flow",
+        project: "/home/me/code/pigger-switch",
+        model: "claude-opus-5-5",
+        requestCount: 64,
+        totalTokens: 900_000,
+        cacheReadTokens: 12_000_000,
+        totalCost: "3.25",
+        firstAt: Math.floor(Date.now() / 1000) - 3600,
+        lastAt: Math.floor(Date.now() / 1000) - 60,
+      },
+    ]);
+    usageApiMock.getHourlyActivity.mockResolvedValue([
+      {
+        weekday: 2,
+        hour: 14,
+        requestCount: 40,
+        totalTokens: 500_000,
+        totalCost: "2.5",
       },
     ]);
     usageApiMock.getModelStats.mockResolvedValue([
@@ -158,10 +180,37 @@ describe("UsageDashboard (smoke)", () => {
     ).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByText("usage.cacheWrite")).toBeInTheDocument();
 
-    // 供应商：汇总速度 92000 / 1000 s = 92 tok/s
-    await user.click(screen.getByRole("tab", { name: "usage.tabs.providers" }));
-    const providerRow = (await screen.findByText("DeepSeek")).closest("tr")!;
-    expect(within(providerRow).getByText("92")).toBeInTheDocument();
+    // 项目：目录名 + 会话数 + 花费
+    await user.click(screen.getByRole("tab", { name: "usage.tabs.projects" }));
+    const projectRow = (await screen.findByText("pigger-switch")).closest(
+      "tr",
+    )!;
+    expect(within(projectRow).getByText("12")).toBeInTheDocument();
+    expect(within(projectRow).getByText("$6.10")).toBeInTheDocument();
+
+    // 会话：标题；点进去回到请求日志并按会话筛选
+    await user.click(screen.getByRole("tab", { name: "usage.tabs.sessions" }));
+    const sessionRow = (await screen.findByText("Fix the login flow")).closest(
+      "tr",
+    )!;
+    expect(within(sessionRow).getByText("$3.25")).toBeInTheDocument();
+    await user.click(sessionRow);
+    expect(
+      screen.getByRole("tab", { name: "usage.requestLogs" }),
+    ).toHaveAttribute("aria-selected", "true");
+    expect(usageApiMock.getRequestLogs).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        sessionId: "11111111-2222-3333-4444-555555555555",
+      }),
+      0,
+      20,
+    );
+
+    // 活跃时段：最忙的钟头
+    await user.click(screen.getByRole("tab", { name: "usage.tabs.activity" }));
+    expect(
+      await screen.findByText(/usage\.activity\.busiest/),
+    ).toBeInTheDocument();
 
     await user.click(screen.getByRole("tab", { name: "usage.tabs.models" }));
     expect(await screen.findByText("kimi-k2.6")).toBeInTheDocument();

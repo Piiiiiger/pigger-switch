@@ -1,10 +1,12 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ChevronDown } from "lucide-react";
 import { useUsageSummaryByApp } from "@/lib/query/usage";
 import { HelpTip } from "@/components/ui/help-tip";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { previousUsageRange } from "@/lib/usageRange";
+import { APP_COLOR, APP_DISPLAY_NAME } from "@/components/shell/AppGlyph";
 import {
   fmtInt,
   fmtUsd,
@@ -23,7 +25,7 @@ import {
 interface UsageHeroProps {
   range: UsageRangeSelection;
   appType?: string;
-  providerName?: string;
+  project?: string;
   model?: string;
   refreshIntervalMs: number;
   /** 窄容器下指标卡排成两列 */
@@ -82,16 +84,27 @@ function pickSummary(
   return aggregateSummaries(apps.map((a) => a.summary));
 }
 
+/** 和上一段相比的变化；上一段是 0 时不算百分比 */
+function changeRatio(current: number, previous: number | undefined) {
+  if (previous == null || previous <= 0) return null;
+  return (current - previous) / previous;
+}
+
 function MetricCard({
   label,
   help,
   value,
   title,
+  change,
+  changeTitle,
 }: {
   label: string;
   help?: { title: string; body: string };
   value: string;
   title?: string;
+  /** 环比（-0.12 = 少了 12%）；null 不显示 */
+  change?: number | null;
+  changeTitle?: string;
 }) {
   return (
     <div className="flex h-[76px] min-w-0 flex-col justify-between rounded-panel border border-border bg-surface px-3.5 py-3">
@@ -102,6 +115,18 @@ function MetricCard({
             {help.body}
           </HelpTip>
         )}
+        {change != null && Number.isFinite(change) && (
+          <span
+            className="ms-auto shrink-0 ps-1.5 text-badge tabular-nums text-fg-3"
+            title={changeTitle}
+          >
+            {Math.abs(change) < 0.005 ? "" : change > 0 ? "↑" : "↓"}
+            {Math.abs(change * 100) >= 1000
+              ? ">999"
+              : Math.abs(change * 100).toFixed(0)}
+            %
+          </span>
+        )}
       </div>
       <span
         className="truncate text-metric tabular-nums text-fg-1"
@@ -109,6 +134,62 @@ function MetricCard({
       >
         {value}
       </span>
+    </div>
+  );
+}
+
+/** Claude / Codex 的花费各占多少（只在「全部应用」且两边都有数据时显示） */
+function AppSplit({
+  apps,
+  locale,
+}: {
+  apps: UsageSummaryByApp[];
+  locale: string;
+}) {
+  const rows = (["claude", "codex"] as const)
+    .map((app) => {
+      const summary = apps.find((a) => a.appType === app)?.summary;
+      return {
+        app,
+        cost: parseFiniteNumber(summary?.totalCost) ?? 0,
+        tokens: summary?.realTotalTokens ?? 0,
+      };
+    })
+    .filter((row) => row.cost > 0 || row.tokens > 0);
+  const total = rows.reduce((sum, row) => sum + row.cost, 0);
+  if (rows.length < 2 || total <= 0) return null;
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="flex h-1.5 overflow-hidden rounded-full bg-subtle">
+        {rows.map((row) => (
+          <span
+            key={row.app}
+            className="h-full"
+            style={{
+              width: `${(row.cost / total) * 100}%`,
+              background: APP_COLOR[row.app],
+            }}
+          />
+        ))}
+      </div>
+      <div className="flex flex-wrap gap-x-4 gap-y-0.5 text-caption text-fg-2">
+        {rows.map((row) => (
+          <span key={row.app} className="inline-flex items-center gap-1.5">
+            <span
+              className="h-2 w-2 rounded-full"
+              style={{ background: APP_COLOR[row.app] }}
+            />
+            {APP_DISPLAY_NAME[row.app]}
+            <span className="tabular-nums text-fg-1">
+              {fmtUsd(row.cost, 2)}
+            </span>
+            <span className="tabular-nums text-fg-3">
+              {((row.cost / total) * 100).toFixed(0)}% ·{" "}
+              {formatTokensCompact(row.tokens, locale)}
+            </span>
+          </span>
+        ))}
+      </div>
     </div>
   );
 }
@@ -152,7 +233,7 @@ function MiniMetric({
 export function UsageHero({
   range,
   appType,
-  providerName,
+  project,
   model,
   refreshIntervalMs,
   compact = false,
@@ -163,11 +244,29 @@ export function UsageHero({
 
   const { data, isLoading } = useUsageSummaryByApp(
     range,
-    { providerName, model },
+    { project, model },
     {
       refetchInterval: refreshIntervalMs > 0 ? refreshIntervalMs : false,
     },
   );
+
+  // 环比：上一个同样长的时间段（「全部」没有）
+  const previousRange = useMemo(
+    () => previousUsageRange(range),
+    // 预设范围的上一段随时间平移；按分钟取整，避免每次渲染都换查询键
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [range, Math.floor(Date.now() / 60_000)],
+  );
+  const { data: previousData } = useUsageSummaryByApp(
+    previousRange ?? range,
+    { project, model },
+    { refetchInterval: false },
+  );
+  const previous = previousRange
+    ? pickSummary(previousData ?? [], appType)
+    : undefined;
+  const previousCost = parseFiniteNumber(previous?.totalCost) ?? undefined;
+  const changeTitle = t("usage.metrics.vsPrevious");
 
   // No client-side filtering: totals must match the Trend/Logs/Stats below,
   // which all go through the backend's full set of app_types. The
@@ -218,10 +317,30 @@ export function UsageHero({
                 placeholder ?? (totalCost == null ? "--" : fmtUsd(totalCost, 2))
               }
               title={totalCost == null ? undefined : fmtUsd(totalCost, 6)}
+              change={
+                previousRange && totalCost != null
+                  ? changeRatio(totalCost, previousCost)
+                  : null
+              }
+              changeTitle={
+                previousCost != null
+                  ? `${changeTitle}: ${fmtUsd(previousCost, 2)}`
+                  : changeTitle
+              }
             />
             <MetricCard
               label={t("usage.totalRequests")}
               value={placeholder ?? fmtInt(requests, locale)}
+              change={
+                previousRange
+                  ? changeRatio(requests, previous?.totalRequests)
+                  : null
+              }
+              changeTitle={
+                previous
+                  ? `${changeTitle}: ${fmtInt(previous.totalRequests, locale)}`
+                  : changeTitle
+              }
             />
             <MetricCard
               label={t("usage.realTotal")}
@@ -231,6 +350,16 @@ export function UsageHero({
               }}
               value={placeholder ?? formatTokensCompact(realTotal, locale)}
               title={fmtInt(realTotal, locale)}
+              change={
+                previousRange
+                  ? changeRatio(realTotal, previous?.realTotalTokens)
+                  : null
+              }
+              changeTitle={
+                previous
+                  ? `${changeTitle}: ${formatTokensCompact(previous.realTotalTokens, locale)}`
+                  : changeTitle
+              }
             />
             <MetricCard
               label={t("usage.cacheHitRate")}
@@ -241,6 +370,7 @@ export function UsageHero({
               value={placeholder ?? `${hitPercentLabel}%`}
             />
           </div>
+          {!appType && <AppSplit apps={allApps} locale={locale} />}
           {moreOpen && (
             <div
               className={cn(

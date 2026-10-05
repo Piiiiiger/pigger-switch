@@ -1,83 +1,43 @@
-import { Monitor, Terminal } from "lucide-react";
-import type { AppId } from "@/lib/api";
-import { ProviderIcon } from "@/components/ProviderIcon";
+import claudeSvg from "@/assets/brands/claude.svg?raw";
+import openaiSvg from "@/assets/brands/openai.svg?raw";
+import type { AppType } from "@/types/usage";
 import { cn } from "@/lib/utils";
 
 /** 应用名：品牌名不翻译，四种语言都写原文。 */
-export const APP_DISPLAY_NAME: Record<AppId, string> = {
+export const APP_DISPLAY_NAME: Record<AppType, string> = {
   claude: "Claude Code",
-  "claude-desktop": "Claude Desktop",
   codex: "Codex",
-  gemini: "Gemini CLI",
-  grokbuild: "Grok Build",
-  opencode: "OpenCode",
-  openclaw: "OpenClaw",
-  hermes: "Hermes",
-  pi: "Pi",
-  mcode: "MiniMax Code",
 };
 
-const APP_ICON_NAME: Record<AppId, string> = {
-  claude: "claude",
-  "claude-desktop": "claude",
-  codex: "openai",
-  gemini: "gemini",
-  grokbuild: "grok",
-  opencode: "opencode",
-  openclaw: "openclaw",
-  hermes: "hermes",
-  pi: "pi",
-  mcode: "minimax",
+/** 图表里区分两个应用用的颜色（Claude 橙、Codex 青绿） */
+export const APP_COLOR: Record<AppType, string> = {
+  claude: "#D97757",
+  codex: "#10A37F",
 };
 
-// Claude Code 和 Claude Desktop 用同一个图标，靠右下角的小角标区分终端与桌面
-const APP_BADGE_ICON: Partial<Record<AppId, typeof Terminal>> = {
-  claude: Terminal,
-  "claude-desktop": Monitor,
+const APP_SVG: Record<AppType, string> = {
+  claude: claudeSvg,
+  codex: openaiSvg,
 };
 
 interface AppGlyphProps {
-  app: AppId;
-  /** 图标边长：侧栏 16，页头 20 */
+  app: AppType;
   size?: number;
-  /** 角标底色要和所在的行一致，否则看起来像缺了一块 */
-  badgeClassName?: string;
   className?: string;
 }
 
-/** 应用图标 + 角标（装饰性，名称由旁边的文字或按钮的 aria-label 提供）。 */
-export function AppGlyph({
-  app,
-  size = 16,
-  badgeClassName,
-  className,
-}: AppGlyphProps) {
-  const BadgeIcon = APP_BADGE_ICON[app];
+/** 应用图标（装饰性，名称由旁边的文字或按钮的 aria-label 提供）。 */
+export function AppGlyph({ app, size = 16, className }: AppGlyphProps) {
   return (
     <span
       aria-hidden="true"
       className={cn(
-        "relative inline-flex shrink-0 items-center justify-center",
+        "inline-flex shrink-0 items-center justify-center [&>svg]:h-full [&>svg]:w-full",
+        app === "claude" ? "text-[#D97757]" : "text-fg-1",
         className,
       )}
-      style={{ width: size + 2, height: size + 2 }}
-    >
-      <ProviderIcon
-        icon={APP_ICON_NAME[app]}
-        name=""
-        size={size}
-        showFallback={false}
-      />
-      {BadgeIcon && (
-        <span
-          className={cn(
-            "absolute -bottom-1 -right-1 flex h-[11px] w-[11px] items-center justify-center rounded-[3px] bg-sidebar text-fg-2",
-            badgeClassName,
-          )}
-        >
-          <BadgeIcon className="h-[9px] w-[9px]" strokeWidth={3} />
-        </span>
-      )}
-    </span>
+      style={{ width: size, height: size }}
+      dangerouslySetInnerHTML={{ __html: APP_SVG[app] }}
+    />
   );
 }

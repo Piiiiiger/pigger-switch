@@ -7,8 +7,10 @@ import {
   ChartColumn,
   ChevronDown,
   Database,
+  Download,
   Loader2,
   RefreshCw,
+  X,
 } from "lucide-react";
 import { AppPageHeader } from "@/components/shell/AppPageHeader";
 import { AppGlyph, APP_DISPLAY_NAME } from "@/components/shell/AppGlyph";
@@ -35,7 +37,7 @@ import {
 import {
   usageKeys,
   useModelStats,
-  useProviderStats,
+  useProjectStats,
   useSessionUsageLastSync,
 } from "@/lib/query/usage";
 import { useUsageEventBridge } from "@/hooks/useUsageEventBridge";
@@ -45,7 +47,9 @@ import { cn } from "@/lib/utils";
 import { UsageHero } from "./UsageHero";
 import { UsageTrendChart } from "./UsageTrendChart";
 import { RequestLogTable } from "./RequestLogTable";
-import { ProviderStatsTable } from "./ProviderStatsTable";
+import { ProjectStatsTable } from "./ProjectStatsTable";
+import { SessionStatsTable, sessionLabel } from "./SessionStatsTable";
+import { ActivityHeatmap } from "./ActivityHeatmap";
 import { ModelStatsTable } from "./ModelStatsTable";
 import { PricingConfigPanel } from "./PricingConfigPanel";
 import { RequestDetailPanel } from "./RequestDetailPanel";
@@ -53,6 +57,14 @@ import { UsageDataSourcesSheet } from "./UsageDataSourcesSheet";
 import { UsageDateRangePicker } from "./UsageDateRangePicker";
 import { UsageHeatmap } from "./UsageHeatmap";
 import { fmtInt, formatRelativeTime, getLocaleFromLanguage } from "./format";
+import { projectLabel, shortenHome } from "./project";
+import {
+  CSV_EXPORT_KINDS,
+  exportUsageCsv,
+  type CsvExportKind,
+} from "./exportCsv";
+import { LimitsStrip } from "@/components/limits/LimitsStrip";
+import type { SessionStats } from "@/types/usage";
 
 const DEFAULT_REFRESH_INTERVAL_MS = 30000;
 const REFRESH_INTERVAL_OPTIONS_MS = [0, 5000, 10000, 30000, 60000] as const;
@@ -68,8 +80,21 @@ const normalizeRefreshInterval = (value: number | undefined) =>
 
 const STATUS_CODE_OPTIONS = [200, 400, 401, 429, 500] as const;
 
-type UsageTab = "logs" | "providers" | "models" | "pricing";
-const TABS: UsageTab[] = ["logs", "providers", "models", "pricing"];
+type UsageTab =
+  | "logs"
+  | "projects"
+  | "sessions"
+  | "models"
+  | "activity"
+  | "pricing";
+const TABS: UsageTab[] = [
+  "logs",
+  "projects",
+  "sessions",
+  "models",
+  "activity",
+  "pricing",
+];
 
 /**
  * 手动「立即同步」的时间，离开页面再回来也还在。后端也会记下最近一次扫描（后台定时和
@@ -137,32 +162,34 @@ interface UsageDashboardProps {
   onSessionAutoSyncEnabledChange?: (
     next: boolean,
   ) => Promise<boolean> | boolean | void;
-  /** 从应用页「查看此应用的用量」进入时带上的应用筛选 */
-  initialAppType?: AppTypeFilter;
-  /** 「数据来源」里的「修改记录请求用量」：打开设置 → 本地路由 */
-  onOpenRoutingSettings?: () => void;
+  /** 点额度条打开订阅额度页 */
+  onOpenLimits?: () => void;
+  /** 「数据来源」里的「修改日志目录」：打开设置 */
+  onOpenSettings?: () => void;
 }
 
 /**
- * 用量统计全局页（v7 S6）：页头 → 筛选行 → 指标 → 趋势图 → 子页签（请求日志 / 供应商 / 模型 / 定价）。
+ * 用量统计页：页头 → 筛选行 → 额度条 → 指标 → 趋势图 →
+ * 子页签（请求日志 / 项目 / 会话 / 模型 / 活跃时段 / 定价）。
  */
 export function UsageDashboard({
   refreshIntervalMs: savedRefreshIntervalMs,
   onRefreshIntervalChange,
   sessionAutoSyncEnabled = true,
   onSessionAutoSyncEnabledChange,
-  initialAppType = "all",
-  onOpenRoutingSettings,
+  onOpenLimits,
+  onOpenSettings,
 }: UsageDashboardProps = {}) {
   const { t, i18n } = useTranslation();
   const queryClient = useQueryClient();
   const [range, setRange] = useState<UsageRangeSelection>({
     preset: "today",
   });
-  const [appType, setAppType] = useState<AppTypeFilter>(initialAppType);
-  const [providerName, setProviderName] = useState<string | undefined>(
-    undefined,
-  );
+  const [appType, setAppType] = useState<AppTypeFilter>("all");
+  const [project, setProject] = useState<string | undefined>(undefined);
+  // 会话页点进来：请求日志只看这一个会话
+  const [sessionFilter, setSessionFilter] = useState<SessionStats | null>(null);
+  const [exporting, setExporting] = useState(false);
   const [model, setModel] = useState<string | undefined>(undefined);
   const [statusCode, setStatusCode] = useState<number | undefined>(undefined);
   const [tab, setTab] = useState<UsageTab>("logs");
@@ -193,25 +220,41 @@ export function UsageDashboard({
     setRefreshIntervalMs(normalizeRefreshInterval(savedRefreshIntervalMs));
   }, [savedRefreshIntervalMs]);
 
-  useEffect(() => {
-    setAppType(initialAppType);
-    setProviderName(undefined);
-    setModel(undefined);
-  }, [initialAppType]);
-
   // 切应用时清掉下游筛选，避免留下一个在新范围内查无数据的"幽灵"组合；
-  // 切供应商同理清掉模型（模型选项随供应商级联）。
+  // 切项目同理清掉模型（模型选项随项目级联）。
   const changeAppType = (next: AppTypeFilter) => {
     setAppType(next);
     if (next !== appType) {
-      setProviderName(undefined);
+      setProject(undefined);
       setModel(undefined);
+      setSessionFilter(null);
     }
   };
-  const changeProviderName = (next: string | undefined) => {
-    setProviderName(next);
-    if (next !== providerName) {
+  const changeProject = (next: string | undefined) => {
+    setProject(next);
+    if (next !== project) {
       setModel(undefined);
+      setSessionFilter(null);
+    }
+  };
+  const openSession = (session: SessionStats) => {
+    setSessionFilter(session);
+    setTab("logs");
+  };
+
+  const runExport = async (kind: CsvExportKind) => {
+    setExporting(true);
+    try {
+      const path = await exportUsageCsv(kind, range, {
+        appType,
+        project,
+        model,
+      });
+      if (path) toast.success(t("usage.export.done", { path }));
+    } catch (error) {
+      toast.error(t("usage.export.failed", { error: String(error) }));
+    } finally {
+      setExporting(false);
     }
   };
 
@@ -311,14 +354,14 @@ export function UsageDashboard({
     refetchInterval:
       refreshIntervalMs > 0 ? refreshIntervalMs : (false as const),
   };
-  const { data: providerOptionsData } = useProviderStats(
+  const { data: projectOptionsData } = useProjectStats(
     range,
     { appType },
     refetch,
   );
   const { data: modelOptionsData } = useModelStats(
     range,
-    { appType, providerName },
+    { appType, project },
     refetch,
   );
   // 有没有任何用量（不分时间范围）：一条都没有时显示空状态
@@ -329,20 +372,20 @@ export function UsageDashboard({
   });
   const isEmpty = allTimeSummary != null && allTimeSummary.totalRequests === 0;
 
-  const providerOptions = useMemo(() => {
+  const projectOptions = useMemo(() => {
     const counts = new Map<string, number>();
-    for (const stat of providerOptionsData ?? []) {
+    for (const stat of projectOptionsData ?? []) {
       counts.set(
-        stat.providerName,
-        (counts.get(stat.providerName) ?? 0) + stat.requestCount,
+        stat.project,
+        (counts.get(stat.project) ?? 0) + stat.requestCount,
       );
     }
     // 数据刷新后选中项可能掉出列表（如改了时间范围）；补回去保证用户看得见、能清除
-    if (providerName && !counts.has(providerName)) counts.set(providerName, 0);
+    if (project != null && !counts.has(project)) counts.set(project, 0);
     return Array.from(counts, ([name, count]) => ({ name, count })).sort(
       (a, b) => b.count - a.count,
     );
-  }, [providerOptionsData, providerName]);
+  }, [projectOptionsData, project]);
 
   const modelOptions = useMemo(() => {
     const counts = new Map<string, number>();
@@ -355,7 +398,7 @@ export function UsageDashboard({
     );
   }, [modelOptionsData, model]);
 
-  const providerTotal = providerOptions.reduce((sum, p) => sum + p.count, 0);
+  const projectTotal = projectOptions.reduce((sum, p) => sum + p.count, 0);
   const modelTotal = modelOptions.reduce((sum, m) => sum + m.count, 0);
 
   // ── 页头 ─────────────────────────────────────────────────────────────
@@ -443,6 +486,39 @@ export function UsageDashboard({
           ))}
         </DropdownMenuContent>
       </DropdownMenu>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button
+            type="button"
+            variant="quiet"
+            size="regular"
+            className="shrink-0 gap-1.5 ps-2.5 text-fg-2"
+            disabled={exporting}
+            aria-label={t("usage.export.label")}
+          >
+            {exporting ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Download className="h-3.5 w-3.5" />
+            )}
+            {showSyncText && t("usage.export.label")}
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent
+          align="end"
+          className={cn(menuContentClass, "min-w-[200px]")}
+        >
+          {CSV_EXPORT_KINDS.map((kind) => (
+            <DropdownMenuItem
+              key={kind}
+              className={menuItemClass}
+              onSelect={() => void runExport(kind)}
+            >
+              {t(`usage.export.${kind}`)}
+            </DropdownMenuItem>
+          ))}
+        </DropdownMenuContent>
+      </DropdownMenu>
       <Button
         type="button"
         variant="quiet"
@@ -505,11 +581,7 @@ export function UsageDashboard({
               )}
               onClick={() => changeAppType(app)}
             >
-              <AppGlyph
-                app={app}
-                size={16}
-                badgeClassName={appType === app ? "bg-surface" : "bg-subtle"}
-              />
+              <AppGlyph app={app} size={16} />
             </button>
           </HoverTip>
         ))}
@@ -521,37 +593,47 @@ export function UsageDashboard({
             type="button"
             variant="neutral"
             size="regular"
-            className="min-w-[78px] max-w-[156px] shrink gap-1 pe-2 ps-3"
-            title={providerName ?? t("usage.providerFilter.title")}
+            className="min-w-[78px] max-w-[180px] shrink gap-1 pe-2 ps-3"
+            title={
+              project != null
+                ? shortenHome(project) || projectLabel(project, t)
+                : t("usage.projectFilter.title")
+            }
           >
             <span className="min-w-0 truncate">
-              {providerName ?? t("usage.providerFilter.label")}
+              {project != null
+                ? projectLabel(project, t)
+                : t("usage.projectFilter.label")}
             </span>
             <ChevronDown className="h-3.5 w-3.5 shrink-0 text-fg-2" />
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent
           align="end"
-          aria-label={t("usage.providerFilter.title")}
+          aria-label={t("usage.projectFilter.title")}
           className={cn(menuContentClass, "max-h-[360px] overflow-y-auto")}
         >
           <DropdownMenuItem
             className={menuItemClass}
-            onSelect={() => changeProviderName(undefined)}
+            onSelect={() => changeProject(undefined)}
           >
-            <MenuCheck checked={providerName == null} />
-            {t("usage.providerFilter.all")}
-            <MenuMeta>{fmtInt(providerTotal, locale)}</MenuMeta>
+            <MenuCheck checked={project == null} />
+            {t("usage.projectFilter.all")}
+            <MenuMeta>{fmtInt(projectTotal, locale)}</MenuMeta>
           </DropdownMenuItem>
-          {providerOptions.map((option) => (
+          {projectOptions.map((option) => (
             <DropdownMenuItem
-              key={option.name}
+              key={option.name || "__unknown"}
               className={menuItemClass}
-              title={option.name}
-              onSelect={() => changeProviderName(option.name)}
+              title={option.name ? shortenHome(option.name) : undefined}
+              onSelect={() => changeProject(option.name)}
             >
-              <MenuCheck checked={providerName === option.name} />
-              <span className="min-w-0 truncate">{option.name}</span>
+              <MenuCheck checked={project === option.name} />
+              <span
+                className={cn("min-w-0 truncate", !option.name && "text-fg-3")}
+              >
+                {projectLabel(option.name, t)}
+              </span>
               <MenuMeta>{fmtInt(option.count, locale)}</MenuMeta>
             </DropdownMenuItem>
           ))}
@@ -612,8 +694,10 @@ export function UsageDashboard({
   // ── 子页签 ───────────────────────────────────────────────────────────
   const tabLabel: Record<UsageTab, string> = {
     logs: t("usage.requestLogs"),
-    providers: t("usage.tabs.providers"),
+    projects: t("usage.tabs.projects"),
+    sessions: t("usage.tabs.sessions"),
     models: t("usage.tabs.models"),
+    activity: t("usage.tabs.activity"),
     pricing: t("usage.tabs.pricing"),
   };
   const statusLabel =
@@ -659,9 +743,13 @@ export function UsageDashboard({
           ))}
         </DropdownMenuContent>
       </DropdownMenu>
-    ) : tab === "providers" || tab === "models" ? (
+    ) : tab === "models" ? (
       <span className="text-caption text-fg-3">
         {t("usage.sortedByRequests")}
+      </span>
+    ) : tab === "projects" || tab === "sessions" ? (
+      <span className="text-caption text-fg-3">
+        {tab === "sessions" ? t("usage.sessionsHint") : t("usage.sortedByCost")}
       </span>
     ) : null;
 
@@ -684,31 +772,70 @@ export function UsageDashboard({
         id="usage-tabpanel"
         aria-labelledby={`usage-tab-${tab}`}
       >
+        {tab === "logs" && sessionFilter && (
+          <div className="flex items-center gap-2 pt-2.5 text-caption text-fg-2">
+            {t("usage.sessionFilter")}
+            <span className="inline-flex max-w-[420px] items-center gap-1 rounded-[5px] bg-subtle py-0.5 pe-1 ps-2 text-fg-1">
+              <span className="truncate" title={sessionFilter.sessionId}>
+                {sessionLabel(sessionFilter)}
+              </span>
+              <button
+                type="button"
+                aria-label={t("usage.clearSessionFilter")}
+                className="flex h-4 w-4 items-center justify-center rounded-[3px] text-fg-2 hover:bg-selected hover:text-fg-1"
+                onClick={() => setSessionFilter(null)}
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </span>
+          </div>
+        )}
         {tab === "logs" && (
           <RequestLogTable
-            range={range}
-            appType={appType}
-            providerName={providerName}
-            model={model}
+            range={sessionFilter ? { preset: "all" } : range}
+            appType={sessionFilter ? sessionFilter.appType : appType}
+            project={sessionFilter ? undefined : project}
+            sessionId={sessionFilter?.sessionId}
+            model={sessionFilter ? undefined : model}
             statusCode={statusCode}
             refreshIntervalMs={refreshIntervalMs}
             onOpenDetail={setDetailRequestId}
           />
         )}
-        {tab === "providers" && (
-          <ProviderStatsTable
+        {tab === "projects" && (
+          <ProjectStatsTable
             range={range}
             appType={appType}
-            providerName={providerName}
+            project={project}
             model={model}
             refreshIntervalMs={refreshIntervalMs}
+            onSelectProject={(next) => changeProject(next)}
+          />
+        )}
+        {tab === "sessions" && (
+          <SessionStatsTable
+            range={range}
+            appType={appType}
+            project={project}
+            model={model}
+            refreshIntervalMs={refreshIntervalMs}
+            onOpenSession={openSession}
           />
         )}
         {tab === "models" && (
           <ModelStatsTable
             range={range}
             appType={appType}
-            providerName={providerName}
+            project={project}
+            model={model}
+            refreshIntervalMs={refreshIntervalMs}
+          />
+        )}
+        {tab === "activity" && (
+          <ActivityHeatmap
+            range={range}
+            appType={appType}
+            project={project}
             model={model}
             refreshIntervalMs={refreshIntervalMs}
           />
@@ -770,10 +897,12 @@ export function UsageDashboard({
         id="main-content"
         className="flex min-h-0 flex-1 flex-col gap-3.5 overflow-y-auto scroll-stable px-6 pb-6 pt-1"
       >
+        <LimitsStrip onOpenLimits={onOpenLimits} />
+
         <UsageHero
           range={range}
           appType={scopedAppType}
-          providerName={providerName}
+          project={project}
           model={model}
           refreshIntervalMs={refreshIntervalMs}
           compact={compact}
@@ -783,7 +912,7 @@ export function UsageDashboard({
         {range.preset === "all" ? (
           <UsageHeatmap
             appType={appType}
-            providerName={providerName}
+            project={project}
             model={model}
             refreshIntervalMs={refreshIntervalMs}
           />
@@ -792,7 +921,7 @@ export function UsageDashboard({
             range={range}
             rangeLabel={rangeLabel}
             appType={appType}
-            providerName={providerName}
+            project={project}
             model={model}
             refreshIntervalMs={refreshIntervalMs}
           />
@@ -829,7 +958,7 @@ export function UsageDashboard({
         syncedLabel={drawerSyncedLabel}
         syncing={syncingSession}
         onSyncNow={() => void runManualSessionSync()}
-        onOpenRoutingSettings={onOpenRoutingSettings}
+        onOpenSettings={onOpenSettings}
         rebuildingCodex={rebuildingCodex}
         onRebuildCodex={() => setShowRebuildConfirm(true)}
       />

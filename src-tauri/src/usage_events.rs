@@ -1,6 +1,6 @@
 //! 使用统计实时刷新事件模块
 //!
-//! 当 `proxy_request_logs` 表写入新数据时（代理日志、会话同步、归档等），
+//! 当 `proxy_request_logs` 表写入新数据时（会话同步、导入、归档等），
 //! 通过本模块向前端 emit `usage-log-recorded` 事件，让 UsageDashboard
 //! 立刻 invalidate 查询缓存而无需等待轮询周期。
 //!
@@ -67,6 +67,8 @@ pub fn notify_log_recorded() {
         if let Err(e) = handle.emit(EVENT_USAGE_LOG_RECORDED, ()) {
             log::warn!("emit {EVENT_USAGE_LOG_RECORDED} 失败: {e}");
         }
+        // 托盘里的今日用量跟着刷新
+        crate::tray::schedule_tray_refresh(&handle);
     });
 }
 

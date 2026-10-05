@@ -12,7 +12,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { HelpTip } from "@/components/ui/help-tip";
 import { Switch } from "@/components/ui/switch";
-import { useGlobalProxyConfig } from "@/lib/query/proxy";
+import { useAppInfo } from "@/hooks/useSettings";
 import { APP_DISPLAY_NAME } from "@/components/shell/AppGlyph";
 import { KNOWN_APP_TYPES } from "@/types/usage";
 import { cn } from "@/lib/utils";
@@ -27,8 +27,8 @@ interface UsageDataSourcesSheetProps {
   syncedLabel?: string;
   syncing: boolean;
   onSyncNow: () => void;
-  /** 打开设置 → 本地路由（「记录请求用量」开关在那里） */
-  onOpenRoutingSettings?: () => void;
+  /** 打开设置（日志目录、从 CC Switch 导入在那里） */
+  onOpenSettings?: () => void;
   rebuildingCodex: boolean;
   /** 只负责打开确认框；确认框里写清后果 */
   onRebuildCodex: () => void;
@@ -61,26 +61,40 @@ function SourceCard({
   );
 }
 
-function LoggingStatus() {
+/** 一个日志目录：路径 + 找没找到 */
+function DirectoryRow({
+  label,
+  path,
+  exists,
+}: {
+  label: string;
+  path?: string;
+  exists?: boolean;
+}) {
   const { t } = useTranslation();
-  const { data: config, isLoading } = useGlobalProxyConfig();
-  if (isLoading || !config) {
-    return <Loader2 className="h-4 w-4 animate-spin text-fg-3" />;
-  }
-  const on = config.enableLogging;
   return (
-    <span
-      className={cn(
-        "rounded-[5px] px-1.5 text-badge leading-5",
-        on ? "bg-success-soft text-success-text" : "bg-subtle text-fg-2",
+    <li className="flex min-w-0 items-center gap-2">
+      <span className="shrink-0 text-fg-2">{label}</span>
+      <span className="min-w-0 flex-1 truncate font-mono" title={path}>
+        {path ?? "…"}
+      </span>
+      {exists != null && (
+        <span
+          className={cn(
+            "shrink-0 rounded-[5px] px-1.5 text-badge leading-5",
+            exists
+              ? "bg-success-soft text-success-text"
+              : "bg-subtle text-fg-2",
+          )}
+        >
+          {exists ? t("usage.sources.found") : t("usage.sources.notFound")}
+        </span>
       )}
-    >
-      {on ? t("usage.sources.on") : t("usage.sources.off")}
-    </span>
+    </li>
   );
 }
 
-/** 「数据来源」抽屉（v7 S6）：会话日志扫描、路由请求日志（只读）、Codex 用量维护。 */
+/** 「数据来源」抽屉：会话日志扫描、日志目录、Codex 用量维护。 */
 export function UsageDataSourcesSheet({
   open,
   onOpenChange,
@@ -89,11 +103,12 @@ export function UsageDataSourcesSheet({
   syncedLabel,
   syncing,
   onSyncNow,
-  onOpenRoutingSettings,
+  onOpenSettings,
   rebuildingCodex,
   onRebuildCodex,
 }: UsageDataSourcesSheetProps) {
   const { t, i18n } = useTranslation();
+  const { data: info } = useAppInfo();
   const coveredApps = joinNames(
     KNOWN_APP_TYPES.map((app) => APP_DISPLAY_NAME[app]),
     getResolvedLang(i18n),
@@ -135,7 +150,6 @@ export function UsageDataSourcesSheet({
             <ul className="m-0 flex list-none flex-col gap-1 rounded-control bg-subtle px-3 py-2.5 text-caption text-fg-2">
               <li>{t("usage.sources.coverage", { apps: coveredApps })}</li>
               <li>{syncedLabel ? `${cadence} · ${syncedLabel}` : cadence}</li>
-              <li>{t("usage.sources.unsupported")}</li>
             </ul>
             <div className="flex justify-end">
               <Button
@@ -152,23 +166,34 @@ export function UsageDataSourcesSheet({
           </SourceCard>
 
           <SourceCard
-            title={t("routingSettings.logging")}
+            title={t("usage.sources.dirsTitle")}
             help={{
-              title: t("usage.sources.loggingHelpTitle"),
-              body: t("usage.sources.loggingHelp"),
+              title: t("usage.sources.dirsTitle"),
+              body: t("usage.sources.dirsHelp"),
             }}
-            trailing={open ? <LoggingStatus /> : null}
           >
-            {onOpenRoutingSettings && (
+            <ul className="m-0 flex list-none flex-col gap-1.5 rounded-control bg-subtle px-3 py-2.5 text-caption">
+              <DirectoryRow
+                label="Claude Code"
+                path={info?.claudeDir}
+                exists={info?.claudeDirExists}
+              />
+              <DirectoryRow
+                label="Codex"
+                path={info?.codexDir}
+                exists={info?.codexDirExists}
+              />
+            </ul>
+            {onOpenSettings && (
               <button
                 type="button"
                 className="inline-flex w-fit items-center gap-0.5 rounded-[4px] text-body font-medium text-fg-1 underline decoration-border-strong underline-offset-4 hover:decoration-fg-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 onClick={() => {
                   onOpenChange(false);
-                  onOpenRoutingSettings();
+                  onOpenSettings();
                 }}
               >
-                {t("usage.sources.editLogging")}
+                {t("usage.sources.editDirs")}
                 <ChevronRight className="h-3.5 w-3.5" />
               </button>
             )}

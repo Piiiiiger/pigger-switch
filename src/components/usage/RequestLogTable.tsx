@@ -4,14 +4,15 @@ import { useRequestLogs } from "@/lib/query/usage";
 import { TablePagination } from "./TablePagination";
 import { HelpTip } from "@/components/ui/help-tip";
 import { AppGlyph, APP_DISPLAY_NAME } from "@/components/shell/AppGlyph";
-import type { AppId } from "@/lib/api";
 import {
   getFreshInputTokens,
   isUnpricedUsage,
+  type AppType,
   type LogFilters,
   type RequestLog,
   type UsageRangeSelection,
 } from "@/types/usage";
+import { projectLabel, shortenHome } from "./project";
 import { cn } from "@/lib/utils";
 import {
   fmtInt,
@@ -29,7 +30,9 @@ interface RequestLogTableProps {
   /** 旧接口保留；时间范围由页面顶部的筛选统一控制 */
   rangeLabel?: string;
   appType?: string;
-  providerName?: string;
+  project?: string;
+  /** 只看某个会话（会话页点进来时） */
+  sessionId?: string;
   model?: string;
   /** 状态码筛选（页签行右侧的下拉） */
   statusCode?: number;
@@ -68,33 +71,24 @@ export function formatLogFullTime(createdAt: number): string {
   )}`;
 }
 
-export function isKnownAppId(appType: string): appType is AppId {
+export function isKnownAppId(appType: string): appType is AppType {
   return appType in APP_DISPLAY_NAME;
 }
 
-export function appDisplayName(appType: string): string {
-  return isKnownAppId(appType) ? APP_DISPLAY_NAME[appType] : appType;
+/** CC Switch 导入的历史里有 `claude-desktop`，展示时和 Claude Code 合并 */
+function displayAppType(appType: string): string {
+  return appType === "claude-desktop" ? "claude" : appType;
 }
 
-/**
- * 请求日志「应用」列用的短名：图标已经区分了品牌（Claude Code / Desktop 靠角标），
- * 列里只留最短能认出的名字，把宽度让给供应商列。全名在悬停提示里。
- */
-const APP_SHORT_NAME: Record<AppId, string> = {
-  claude: "Claude",
-  "claude-desktop": "Desktop",
-  codex: "Codex",
-  gemini: "Gemini",
-  grokbuild: "Grok",
-  opencode: "OpenCode",
-  openclaw: "OpenClaw",
-  hermes: "Hermes",
-  pi: "Pi",
-  mcode: "MiniMax",
-};
+export function appDisplayName(appType: string): string {
+  const app = displayAppType(appType);
+  return isKnownAppId(app) ? APP_DISPLAY_NAME[app] : appType;
+}
 
+/** 请求日志「应用」列用的短名，全名在悬停提示里 */
 export function appShortName(appType: string): string {
-  return isKnownAppId(appType) ? APP_SHORT_NAME[appType] : appType;
+  const app = displayAppType(appType);
+  return app === "claude" ? "Claude" : app === "codex" ? "Codex" : appType;
 }
 
 const isSuccessStatus = (code: number) => code >= 200 && code < 300;
@@ -102,7 +96,8 @@ const isSuccessStatus = (code: number) => code >= 200 && code < 300;
 export function RequestLogTable({
   range,
   appType: dashboardAppType,
-  providerName,
+  project,
+  sessionId,
   model,
   statusCode,
   refreshIntervalMs,
@@ -117,7 +112,8 @@ export function RequestLogTable({
       dashboardAppType && dashboardAppType !== "all"
         ? dashboardAppType
         : undefined,
-    providerName,
+    project,
+    sessionId,
     model,
     statusCode,
   };
@@ -140,7 +136,8 @@ export function RequestLogTable({
     setPage(0);
   }, [
     dashboardAppType,
-    providerName,
+    project,
+    sessionId,
     model,
     statusCode,
     range.customEndDate,
@@ -163,7 +160,9 @@ export function RequestLogTable({
     const isCacheInclusive = log.inputTokens !== freshInput;
     const time = formatLogTime(log.createdAt, now);
     const fullTime = formatLogFullTime(log.createdAt);
-    const provider = log.providerName || t("usage.unknownProvider");
+    const projectName = projectLabel(log.project, t);
+    const projectTitle = log.project ? shortenHome(log.project) : projectName;
+    const glyphApp = displayAppType(log.appType);
     const exactTps = formatOutputTokensPerSecond(log);
     // 会话日志导入的请求没有首字计时，速度是按日志时间戳估的，前面带 ≈
     const estimatedTps =
@@ -203,7 +202,7 @@ export function RequestLogTable({
             title={fullTime}
             aria-label={t("usage.openRequestDetail", {
               time: fullTime,
-              provider,
+              project: projectName,
             })}
             onClick={(event) => {
               event.stopPropagation();
@@ -226,24 +225,21 @@ export function RequestLogTable({
             className="flex max-w-[88px] items-center gap-1.5"
             title={appDisplayName(log.appType)}
           >
-            {isKnownAppId(log.appType) && (
-              <AppGlyph
-                app={log.appType}
-                size={14}
-                badgeClassName="bg-surface"
-              />
-            )}
+            {isKnownAppId(glyphApp) && <AppGlyph app={glyphApp} size={14} />}
             <span className="truncate" aria-hidden="true">
               {appShortName(log.appType)}
             </span>
             <span className="sr-only">{appDisplayName(log.appType)}</span>
           </span>
         </td>
-        {/* 供应商、模型两列按比例取宽（max-w-0 让百分比宽度生效、内容截断）；
-            比例合计 40%，再大就会把数值列挤到只剩内容宽度。模型名通常比供应商名长 */}
+        {/* 项目、模型两列按比例取宽（max-w-0 让百分比宽度生效、内容截断）；
+            比例合计 40%，再大就会把数值列挤到只剩内容宽度 */}
         <td className={cn(usageTable.td, "w-[18%] max-w-0")}>
-          <span className="block truncate" title={provider}>
-            {provider}
+          <span
+            className={cn("block truncate", !log.project && usageTable.muted)}
+            title={projectTitle}
+          >
+            {projectName}
           </span>
         </td>
         <td className={cn(usageTable.td, usageTable.mono, "w-[22%] max-w-0")}>
@@ -321,7 +317,7 @@ export function RequestLogTable({
             <tr className={usageTable.headRow}>
               <th className={usageTable.th}>{t("usage.time")}</th>
               <th className={usageTable.th}>{t("usage.app")}</th>
-              <th className={usageTable.th}>{t("usage.provider")}</th>
+              <th className={usageTable.th}>{t("usage.project")}</th>
               <th className={usageTable.th}>{t("usage.model")}</th>
               <th className={usageTable.thEnd}>{t("usage.freshInput")}</th>
               <th className={usageTable.thEnd}>{t("usage.outputTokens")}</th>

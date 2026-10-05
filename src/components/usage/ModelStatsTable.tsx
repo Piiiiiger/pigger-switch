@@ -16,7 +16,7 @@ import type { UsageRangeSelection } from "@/types/usage";
 interface ModelStatsTableProps {
   range: UsageRangeSelection;
   appType?: string;
-  providerName?: string;
+  project?: string;
   model?: string;
   refreshIntervalMs: number;
 }
@@ -24,7 +24,7 @@ interface ModelStatsTableProps {
 export function ModelStatsTable({
   range,
   appType,
-  providerName,
+  project,
   model,
   refreshIntervalMs,
 }: ModelStatsTableProps) {
@@ -32,7 +32,7 @@ export function ModelStatsTable({
   const locale = getLocaleFromLanguage(getResolvedLang(i18n));
   const { data: stats, isLoading } = useModelStats(
     range,
-    { appType, providerName, model },
+    { appType, project, model },
     {
       refetchInterval: refreshIntervalMs > 0 ? refreshIntervalMs : false,
     },
@@ -44,7 +44,7 @@ export function ModelStatsTable({
   );
   const pagination = useClientPagination(
     rows,
-    JSON.stringify([range, appType, providerName, model]),
+    JSON.stringify([range, appType, project, model]),
   );
 
   if (isLoading) {

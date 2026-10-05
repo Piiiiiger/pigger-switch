@@ -10,7 +10,9 @@ export interface TokenUsage {
 export interface RequestLog {
   requestId: string;
   providerId: string;
-  providerName?: string;
+  /** 会话所在的工作目录；'' 表示未知 */
+  project?: string;
+  sessionId?: string;
   appType: string;
   model: string;
   requestModel?: string;
@@ -111,22 +113,48 @@ export interface DailyStats {
   totalCacheReadTokens: number;
 }
 
-export interface ProviderStats {
-  providerId: string;
-  providerName: string;
+export interface ProjectStats {
+  /** 工作目录；'' 表示未知（如从 CC Switch 导入的路由记账行） */
+  project: string;
   requestCount: number;
   totalTokens: number;
   totalCost: string;
-  successRate: number;
-  avgLatencyMs: number;
-  /** 速度分子：有首字、输出 ≥ 100 token 的明细请求的输出之和（日汇总不计） */
-  speedOutputTokens?: number;
-  /** 速度分母：同一批请求的（耗时 − 首字）之和，毫秒 */
-  speedGenerationMs?: number;
-  /** 估算速度分子：会话日志导入、有估算耗时、输出 ≥ 200 token 的请求的输出之和 */
-  estSpeedOutputTokens?: number;
-  /** 估算速度分母：同一批请求的估算耗时（含首字等待）之和，毫秒 */
-  estSpeedDurationMs?: number;
+  claudeCost: string;
+  codexCost: string;
+  /** 明细里出现过的会话数（30 天前已按天汇总的部分不计） */
+  sessionCount: number;
+  /** 最近一次请求（秒） */
+  lastActiveAt: number;
+}
+
+export interface SessionStats {
+  appType: string;
+  sessionId: string;
+  title?: string | null;
+  project: string;
+  model: string;
+  requestCount: number;
+  totalTokens: number;
+  cacheReadTokens: number;
+  totalCost: string;
+  firstAt: number;
+  lastAt: number;
+}
+
+export interface HourlyActivity {
+  /** 0 = 周一 … 6 = 周日（本地时间） */
+  weekday: number;
+  hour: number;
+  requestCount: number;
+  totalTokens: number;
+  totalCost: string;
+}
+
+export interface BudgetStatus {
+  todayCost: number;
+  monthCost: number;
+  dailyBudget?: number | null;
+  monthlyBudget?: number | null;
 }
 
 export interface ModelStats {
@@ -139,7 +167,8 @@ export interface ModelStats {
 
 export interface LogFilters {
   appType?: string;
-  providerName?: string;
+  project?: string;
+  sessionId?: string;
   model?: string;
   statusCode?: number;
   startDate?: number;
@@ -147,27 +176,16 @@ export interface LogFilters {
 }
 
 /**
- * Dashboard 顶栏的全局筛选维度，作用于 Hero / 趋势图 / 三个统计 Tab。
+ * Dashboard 顶栏的全局筛选维度，作用于 Hero / 趋势图 / 各统计 Tab。
  *
- * - `providerName` 按展示名精确匹配（与 Provider 统计列表同口径，含
- *   "Claude (Session)" 等会话占位名）；
+ * - `project` 按工作目录精确匹配（与项目统计列表同口径）；
  * - `model` 按「有效计价模型」匹配（pricing_model 优先、回落 model，
  *   与模型统计的分组口径一致）。
  */
 export interface UsageScopeFilters {
   appType?: string;
-  providerName?: string;
+  project?: string;
   model?: string;
-}
-
-export interface ProviderLimitStatus {
-  providerId: string;
-  dailyUsage: string;
-  dailyLimit?: string;
-  dailyExceeded: boolean;
-  monthlyUsage: string;
-  monthlyLimit?: string;
-  monthlyExceeded: boolean;
 }
 
 export type UsageRangePreset =
@@ -189,41 +207,14 @@ export interface UsageRangeSelection {
 }
 
 /**
- * App types surfaced as dashboard filter buttons.
- *
- * `claude-desktop` is intentionally NOT listed: the Desktop gateway's proxy
- * traffic is still recorded under its own `app_type` (preserving route-takeover
- * billing audit — the request detail panel shows the real value), but the
- * dashboard folds it into `claude` for display. It is the embedded Claude Code
- * runtime running inside the Desktop shell, and Desktop *chat* usage never
- * passes through this app at all, so a separate "Claude Desktop" bucket would
- * only ever show a partial number and mislead users into reading it as the
- * Desktop's full usage. The backend collapses `claude-desktop → claude` in
- * every dashboard query (see `folded_app_type_sql`).
- * `opencode` and `pi` have no proxy handler; their usage reaches this
- * dashboard through session importers. `openclaw` / `hermes` appear only as
- * managed apps elsewhere.
+ * Apps surfaced as dashboard filter buttons. Rows that CC Switch recorded as
+ * `claude-desktop` (imported history) are folded into `claude` by the backend.
  */
-export type AppType =
-  | "claude"
-  | "codex"
-  | "gemini"
-  | "grokbuild"
-  | "opencode"
-  | "pi"
-  | "mcode";
+export type AppType = "claude" | "codex";
 
 export type AppTypeFilter = "all" | AppType;
 
-export const KNOWN_APP_TYPES: ReadonlyArray<AppType> = [
-  "claude",
-  "codex",
-  "gemini",
-  "grokbuild",
-  "opencode",
-  "pi",
-  "mcode",
-];
+export const KNOWN_APP_TYPES: ReadonlyArray<AppType> = ["claude", "codex"];
 
 /**
  * App types whose proxy uses an OpenAI-style protocol. Two consequences:
@@ -239,16 +230,6 @@ export const KNOWN_APP_TYPES: ReadonlyArray<AppType> = [
  */
 export const CACHE_INCLUSIVE_APP_TYPES: ReadonlySet<string> = new Set([
   "codex",
-  "gemini",
-  "grokbuild",
-]);
-
-// Pi sessions can mix Anthropic and OpenAI APIs, but the dashboard aggregates
-// only by app type. Treat cache-write coverage as partial without changing
-// Pi's fresh-input token semantics.
-const PARTIAL_CACHE_WRITE_APP_TYPES: ReadonlySet<string> = new Set([
-  "pi",
-  "mcode",
 ]);
 
 export type CacheWriteAvailability = "ok" | "partial" | "na";
@@ -261,10 +242,7 @@ export function getCacheWriteAvailability(
     CACHE_INCLUSIVE_APP_TYPES.has(appType),
   ).length;
   if (unavailable === appTypes.length) return "na";
-  const partial = appTypes.some((appType) =>
-    PARTIAL_CACHE_WRITE_APP_TYPES.has(appType),
-  );
-  return unavailable === 0 && !partial ? "ok" : "partial";
+  return unavailable === 0 ? "ok" : "partial";
 }
 
 /** Subset of request-log fields needed to derive cache-normalized input. */
@@ -331,10 +309,4 @@ export function isUnpricedUsage(log: UsageCostLog): boolean {
     (!Number.isFinite(multiplier) || multiplier !== 0) &&
     totalCost === 0
   );
-}
-
-export interface StatsFilters {
-  timeRange: UsageRangePreset;
-  providerId?: string;
-  appType?: string;
 }

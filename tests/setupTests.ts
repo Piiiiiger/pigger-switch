@@ -4,7 +4,6 @@ import { cleanup } from "@testing-library/react";
 import i18n from "i18next";
 import { initReactI18next } from "react-i18next";
 import { server } from "./msw/server";
-import { resetProviderState } from "./msw/state";
 import "./msw/tauriMocks";
 
 beforeAll(async () => {
@@ -24,11 +23,7 @@ beforeAll(async () => {
 
 afterEach(() => {
   cleanup();
-  // 页面数据的本地缓存（src/lib/localCache.ts）不能从一个用例带到下一个
-  for (const key of Object.keys(localStorage)) {
-    if (key.startsWith("cc-switch-cache:")) localStorage.removeItem(key);
-  }
-  resetProviderState();
+  localStorage.clear();
   server.resetHandlers();
   vi.clearAllMocks();
 });

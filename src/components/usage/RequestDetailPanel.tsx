@@ -29,6 +29,7 @@ import {
   parseFiniteNumber,
 } from "./format";
 import { appDisplayName } from "./RequestLogTable";
+import { projectLabel, shortenHome } from "./project";
 
 interface RequestDetailPanelProps {
   /** 要看的请求；null 时抽屉关闭 */
@@ -111,16 +112,22 @@ function useDetailSections(request: RequestLog) {
       value: appDisplayName(request.appType),
     },
     {
-      key: "provider",
-      label: t("usage.provider"),
-      value: request.providerName || t("usage.unknownProvider"),
+      key: "project",
+      label: t("usage.project"),
+      value: projectLabel(request.project, t),
+      title: request.project ? shortenHome(request.project) : undefined,
+      muted: !request.project,
     },
-    {
-      key: "providerId",
-      label: t("usage.detail.providerId"),
-      value: request.providerId,
-      mono: true,
-    },
+    ...(request.sessionId
+      ? [
+          {
+            key: "session",
+            label: t("usage.session"),
+            value: request.sessionId,
+            mono: true,
+          },
+        ]
+      : []),
     { key: "model", label: t("usage.model"), value: request.model, mono: true },
   ];
   if (request.requestModel && request.requestModel !== request.model) {
@@ -356,7 +363,7 @@ export function RequestDetailPanel({
     ? [
         new Date(request.createdAt * 1000).toLocaleString(),
         appDisplayName(request.appType),
-        request.providerName || t("usage.unknownProvider"),
+        projectLabel(request.project, t),
       ].join(" · ")
     : undefined;
 

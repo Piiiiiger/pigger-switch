@@ -84,3 +84,28 @@ export function getUsageRangePresetLabel(
       return t("usage.customRange", { defaultValue: "日历筛选" });
   }
 }
+
+/**
+ * 上一个同样长的时间段，用来算环比：「今天」对比昨天同一时刻之前，
+ * 「7 天」对比再往前 7 天，自定义范围整体往前挪一个长度。「全部」没有上一段。
+ */
+export function previousUsageRange(
+  selection: UsageRangeSelection,
+  nowMs: number = Date.now(),
+): UsageRangeSelection | null {
+  if (selection.preset === "all") return null;
+  const { startDate, endDate } = resolveUsageRange(selection, nowMs);
+  if (selection.preset === "today") {
+    return {
+      preset: "custom",
+      customStartDate: startDate - DAY_SECONDS,
+      customEndDate: endDate - DAY_SECONDS,
+    };
+  }
+  const length = Math.max(1, endDate - startDate);
+  return {
+    preset: "custom",
+    customStartDate: startDate - length,
+    customEndDate: startDate - 1,
+  };
+}

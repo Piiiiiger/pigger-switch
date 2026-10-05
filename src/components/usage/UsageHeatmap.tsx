@@ -18,7 +18,7 @@ type HeatMetric = "tokens" | "requests" | "cost";
 
 interface UsageHeatmapProps {
   appType?: string;
-  providerName?: string;
+  project?: string;
   model?: string;
   refreshIntervalMs: number;
 }
@@ -102,7 +102,7 @@ function cellStyle(level: number) {
 
 /** 最近 53 周的按天数据：起点按天取整，同一天内查询键不变。 */
 function useYearDailyTrends(
-  filters: { appType?: string; providerName?: string; model?: string },
+  filters: { appType?: string; project?: string; model?: string },
   refreshIntervalMs: number,
 ) {
   const startKey = dayKey(getHeatmapStart(new Date()));
@@ -158,7 +158,7 @@ function buildWeeks(
 
 export function UsageHeatmap({
   appType,
-  providerName,
+  project,
   model,
   refreshIntervalMs,
 }: UsageHeatmapProps) {
@@ -182,7 +182,7 @@ export function UsageHeatmap({
   const locale = getLocaleFromLanguage(language);
 
   const { data: trends, isLoading } = useYearDailyTrends(
-    { appType, providerName, model },
+    { appType, project, model },
     refreshIntervalMs,
   );
 
