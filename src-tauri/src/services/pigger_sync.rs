@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::database::{lock_conn, Database, DETAIL_RETAIN_DAYS};
 use crate::error::AppError;
+use crate::services::quota_windows::QuotaWindowsReport;
 use crate::services::sql_helpers::fresh_input_sql;
 use crate::services::subscription::{CredentialStatus, SubscriptionQuota};
 use crate::services::usage_stats::{
@@ -93,6 +94,8 @@ pub struct ReportQuota {
     pub error: String,
     /// 毫秒
     pub queried_at: i64,
+    /// 这个工具每个窗口的估算和过去的窗口；读数失败时没有
+    pub estimates: Option<QuotaWindowsReport>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -368,6 +371,7 @@ pub fn report_quota(quota: &SubscriptionQuota) -> Option<ReportQuota> {
             .or_else(|| quota.credential_message.clone())
             .unwrap_or_default(),
         queried_at: quota.queried_at.unwrap_or(0),
+        estimates: None,
     })
 }
 
@@ -418,7 +422,20 @@ pub fn build_reports(
     } else {
         last.sessions = session_rows(db, now, local_midnight(recent_from))?;
     }
-    last.quotas = quotas.to_vec();
+    // 读数成功的工具带上它每个窗口的估算：面板只有按天的用量，算不出窗口里用了多少
+    last.quotas = Vec::with_capacity(quotas.len());
+    for quota in quotas {
+        let mut quota = quota.clone();
+        if quota.success {
+            quota.estimates = Some(crate::services::quota_windows::build_report(
+                db,
+                &quota.tool,
+                None,
+                now,
+            )?);
+        }
+        last.quotas.push(quota);
+    }
     Ok(reports)
 }
 
@@ -834,6 +851,51 @@ mod tests {
         assert_eq!(report.sessions[0].session_id, "s-long");
         assert_eq!(report.sessions[0].requests, 2);
         assert_eq!(report.sessions[0].cost_usd, 4.0);
+    }
+
+    // 读数成功的工具带上它每个窗口的估算，面板拿它画额度卡；读失败的没有
+    #[test]
+    fn a_reading_carries_the_tools_window_estimates() {
+        let db = Database::memory().unwrap();
+        let today = day("2026-10-06");
+        let now = noon("2026-10-06");
+        {
+            let conn = db.conn.lock().unwrap();
+            insert_log(&conn, "a", "claude", "s1", now - 600, 1, 0, "10");
+            conn.execute(
+                "INSERT INTO quota_snapshots (tool, tier, resets_at, utilization, observed_at)
+                 VALUES ('claude', 'five_hour', ?1, 40.0, ?2)",
+                rusqlite::params![now + 3600, now - 300],
+            )
+            .unwrap();
+        }
+        let claude = ReportQuota {
+            tool: "claude".into(),
+            success: true,
+            plan_label: "Pro".into(),
+            active_until: String::new(),
+            tiers: Vec::new(),
+            error: String::new(),
+            queried_at: 0,
+            estimates: None,
+        };
+        let codex = ReportQuota {
+            tool: "codex".into(),
+            success: false,
+            ..claude.clone()
+        };
+        let reports = build_reports(&db, &laptop(), &[claude, codex], false, today, now).unwrap();
+        let quotas = &reports.last().unwrap().quotas;
+        let estimates = quotas[0]
+            .estimates
+            .as_ref()
+            .expect("a reading carries its estimates");
+        assert_eq!(estimates.windows.len(), 1);
+        assert_eq!(estimates.windows[0].tier, "five_hour");
+        // $10 已用时 40%：额度 $25
+        let limit = estimates.windows[0].limit.as_ref().unwrap();
+        assert!((limit.cost_usd - 25.0).abs() < 1e-6, "{limit:?}");
+        assert!(quotas[1].estimates.is_none());
     }
 
     #[test]
