@@ -14,11 +14,19 @@ pub fn get_settings() -> AppSettings {
 #[tauri::command]
 pub fn save_settings(
     app: tauri::AppHandle,
-    settings: AppSettings,
+    mut settings: AppSettings,
 ) -> Result<AppSettings, AppError> {
     let previous = crate::settings::get_settings();
     crate::services::http_client::validate_proxy(settings.network_proxy_url.as_deref())
         .map_err(AppError::InvalidInput)?;
+    // 用户贴的可能是面板里某一页的地址：存成面板的根地址
+    if let Some(url) = settings
+        .pigger_url
+        .as_deref()
+        .filter(|u| !u.trim().is_empty())
+    {
+        settings.pigger_url = Some(crate::services::pigger_sync::normalize_panel_url(url)?);
+    }
 
     let saved = crate::settings::update_settings(settings)?;
 
@@ -41,6 +49,19 @@ pub fn save_settings(
     }
     if saved.show_in_tray != previous.show_in_tray || saved.language != previous.language {
         crate::tray::schedule_tray_refresh(&app);
+    }
+    let pigger_changed = saved.pigger_sync_enabled != previous.pigger_sync_enabled
+        || saved.pigger_url != previous.pigger_url
+        || saved.pigger_token != previous.pigger_token
+        || saved.pigger_device_name != previous.pigger_device_name;
+    if saved.pigger_sync_enabled && pigger_changed {
+        // 刚打开或改了地址、令牌：马上全量推一遍，设置页能立刻看到结果
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(e) = crate::run_pigger_sync(&app, true).await {
+                log::warn!("同步到 Pigger 失败: {e}");
+            }
+        });
     }
     Ok(saved)
 }

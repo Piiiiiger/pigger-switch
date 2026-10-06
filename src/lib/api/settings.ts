@@ -17,6 +17,29 @@ export interface AppSettings {
   dailyBudgetUsd?: number | null;
   monthlyBudgetUsd?: number | null;
   quotaAlertPercent?: number | null;
+  piggerSyncEnabled: boolean;
+  piggerUrl?: string | null;
+  piggerToken?: string | null;
+  piggerDeviceName?: string | null;
+}
+
+/** 同步到 Pigger 的状态（时间为 Unix 秒） */
+export interface PiggerSyncInfo {
+  running: boolean;
+  lastAttemptAt?: number | null;
+  lastSuccessAt?: number | null;
+  lastFullAt?: number | null;
+  lastError?: string | null;
+  lastRows: number;
+  lastSessions: number;
+  defaultDeviceName: string;
+}
+
+export interface PiggerSyncOutcome {
+  reports: number;
+  rows: number;
+  sessions: number;
+  full: boolean;
 }
 
 export interface AppInfo {
@@ -49,4 +72,9 @@ export const settingsApi = {
   saveTextFile: (path: string, content: string): Promise<void> =>
     invoke("save_text_file", { path, content }),
   openDataDir: (): Promise<void> => invoke("open_data_dir"),
+};
+
+export const piggerSyncApi = {
+  status: (): Promise<PiggerSyncInfo> => invoke("get_pigger_sync_status"),
+  syncNow: (): Promise<PiggerSyncOutcome> => invoke("sync_pigger_now"),
 };

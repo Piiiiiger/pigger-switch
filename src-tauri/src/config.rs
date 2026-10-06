@@ -79,8 +79,14 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
     fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
     let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
     let tmp = parent.join(format!(".{file_name}.tmp.{}", std::process::id()));
+    let _ = fs::remove_file(&tmp);
     {
-        let mut file = fs::File::create(&tmp).map_err(|e| AppError::io(&tmp, e))?;
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        // 设置里存着 Pigger 的令牌：只让本人读写
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let mut file = options.open(&tmp).map_err(|e| AppError::io(&tmp, e))?;
         file.write_all(data).map_err(|e| AppError::io(&tmp, e))?;
         file.sync_all().map_err(|e| AppError::io(&tmp, e))?;
     }
@@ -107,5 +113,22 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
             .collect();
         assert!(leftovers.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_leaves_the_file_readable_only_by_its_owner() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.json");
+        fs::write(&path, b"old").expect("seed");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("chmod");
+        // 用常见桌面的 umask（新文件默认 0644），证明是 atomic_write 自己收紧的
+        let previous = unsafe { libc::umask(0o022) };
+        let written = atomic_write(&path, b"{}");
+        unsafe { libc::umask(previous) };
+        written.expect("write");
+        let mode = fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 }

@@ -70,6 +70,94 @@ pub(crate) async fn run_session_sync(app: &tauri::AppHandle, force: bool) {
     services::alerts::check_budget(app, &state.db);
 }
 
+/// 推一轮用量到 Pigger；`force_full` 为真时（手动同步、刚改设置）把全部历史重发一遍
+pub(crate) async fn run_pigger_sync(
+    app: &tauri::AppHandle,
+    force_full: bool,
+) -> Result<services::pigger_sync::SyncOutcome, AppError> {
+    let state = app.state::<AppState>();
+    let quotas = services::pigger_sync::quotas_from_cache(&state.usage_cache);
+    let full = force_full || services::pigger_sync::full_sync_due(chrono::Utc::now().timestamp());
+    services::pigger_sync::sync_with(state.db.clone(), quotas, full).await
+}
+
+/// 同步到 Pigger：打开时每 10 分钟推一次（启动后第一次全量）
+fn start_pigger_sync(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let mut interval = tokio::time::interval(services::pigger_sync::SYNC_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            if !settings::get_settings().pigger_sync_enabled {
+                continue;
+            }
+            if let Err(e) = run_pigger_sync(&app, false).await {
+                log::warn!("同步到 Pigger 失败: {e}");
+            }
+        }
+    });
+}
+
+/// `pigger-switch --sync-once`：不开窗口，扫一遍会话日志、查一次额度，
+/// 把全部用量推到 Pigger 后返回退出码（给没有桌面的机器配定时任务用）
+pub fn sync_once() -> i32 {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let settings = settings::get_settings();
+    if !settings.pigger_sync_enabled {
+        eprintln!("同步到 Pigger 没有打开：先在 设置 → 同步到 Pigger 里填好并打开");
+        return 2;
+    }
+    if let Err(e) = services::http_client::apply_proxy(settings.network_proxy_url.as_deref()) {
+        eprintln!("网络代理无效，改用系统代理: {e}");
+        let _ = services::http_client::apply_proxy(None);
+    }
+    let db = match Database::init() {
+        Ok(db) => Arc::new(db),
+        Err(e) => {
+            eprintln!("打开用量数据库失败: {e}");
+            return 1;
+        }
+    };
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            eprintln!("启动失败: {e}");
+            return 1;
+        }
+    };
+    runtime.block_on(async move {
+        let scan_db = db.clone();
+        let scan = tokio::task::spawn_blocking(move || {
+            services::session_usage::sync_all_unlocked(&scan_db)
+        });
+        if let Ok(result) = scan.await {
+            for error in &result.errors {
+                eprintln!("扫描会话日志: {error}");
+            }
+        }
+        let mut quotas = Vec::new();
+        for tool in services::alerts::TOOLS {
+            match services::subscription::get_subscription_quota(tool).await {
+                Ok(quota) => quotas.extend(services::pigger_sync::report_quota(&quota)),
+                Err(e) => eprintln!("查询 {tool} 额度失败: {e}"),
+            }
+        }
+        match services::pigger_sync::sync_with(db, quotas, true).await {
+            Ok(outcome) => {
+                println!(
+                    "已同步到 Pigger：{} 份报告、{} 行按天用量、{} 个会话",
+                    outcome.reports, outcome.rows, outcome.sessions
+                );
+                0
+            }
+            Err(e) => {
+                eprintln!("同步到 Pigger 失败: {e}");
+                1
+            }
+        }
+    })
+}
+
 fn start_background_tasks(app: &tauri::AppHandle) {
     // 会话日志：启动时先回填缺失的费用、扫一轮，之后每分钟一次
     let handle = app.clone();
@@ -82,6 +170,8 @@ fn start_background_tasks(app: &tauri::AppHandle) {
         });
         let _ = backfill.await;
         run_session_sync(&handle, true).await;
+        // 第一次推送带上启动时这轮扫描的结果
+        start_pigger_sync(handle.clone());
 
         let mut interval = tokio::time::interval(SESSION_SYNC_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -294,6 +384,9 @@ pub fn run() {
             commands::record_models_dev_sync_result,
             // subscription quota
             commands::get_subscription_quota,
+            // sync to Pigger
+            commands::get_pigger_sync_status,
+            commands::sync_pigger_now,
             // settings & app
             commands::get_settings,
             commands::save_settings,

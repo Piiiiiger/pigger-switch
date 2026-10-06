@@ -54,6 +54,18 @@ pub struct AppSettings {
     /// 订阅额度用到这个百分比时发桌面通知（0 或空为关闭）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_alert_percent: Option<u8>,
+    /// 定时把用量推送到 Pigger 面板的「AI 用量」页
+    #[serde(default)]
+    pub pigger_sync_enabled: bool,
+    /// Pigger 面板地址（含面板的路径）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pigger_url: Option<String>,
+    /// AI 用量页「连接电脑」生成的令牌（只能上传用量）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pigger_token: Option<String>,
+    /// 这台电脑在 Pigger 上显示的名字，为空时用主机名
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pigger_device_name: Option<String>,
 }
 
 impl Default for AppSettings {
@@ -72,6 +84,10 @@ impl Default for AppSettings {
             daily_budget_usd: None,
             monthly_budget_usd: None,
             quota_alert_percent: None,
+            pigger_sync_enabled: false,
+            pigger_url: None,
+            pigger_token: None,
+            pigger_device_name: None,
         }
     }
 }
@@ -93,6 +109,9 @@ impl AppSettings {
         trim(&mut self.codex_config_dir);
         trim(&mut self.network_proxy_url);
         trim(&mut self.language);
+        trim(&mut self.pigger_url);
+        trim(&mut self.pigger_token);
+        trim(&mut self.pigger_device_name);
         if !matches!(
             self.language.as_deref(),
             None | Some("zh" | "zh-TW" | "en" | "ja")
@@ -103,6 +122,10 @@ impl AppSettings {
         self.daily_budget_usd = positive(self.daily_budget_usd);
         self.monthly_budget_usd = positive(self.monthly_budget_usd);
         self.quota_alert_percent = self.quota_alert_percent.filter(|p| (1..=100).contains(p));
+        // 没有地址或令牌就推不了：同步跟着关掉，免得后台每 10 分钟报一次错
+        if self.pigger_url.is_none() || self.pigger_token.is_none() {
+            self.pigger_sync_enabled = false;
+        }
     }
 
     fn load_from_file() -> Self {
@@ -202,6 +225,9 @@ mod tests {
             daily_budget_usd: Some(-1.0),
             monthly_budget_usd: Some(200.0),
             quota_alert_percent: Some(0),
+            pigger_url: Some(" https://panel.example.com/base/ ".to_string()),
+            pigger_sync_enabled: true,
+            pigger_token: Some(" \n".to_string()),
             ..AppSettings::default()
         };
         settings.normalize();
@@ -211,6 +237,12 @@ mod tests {
         assert_eq!(settings.daily_budget_usd, None);
         assert_eq!(settings.monthly_budget_usd, Some(200.0));
         assert_eq!(settings.quota_alert_percent, None);
+        assert_eq!(
+            settings.pigger_url.as_deref(),
+            Some("https://panel.example.com/base/")
+        );
+        assert_eq!(settings.pigger_token, None);
+        assert!(!settings.pigger_sync_enabled);
     }
 
     #[test]

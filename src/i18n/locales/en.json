@@ -60,7 +60,28 @@
     "network": "Network",
     "networkHint": "Only used to query plan limits from Anthropic and OpenAI",
     "proxyUrl": "Proxy (leave empty to follow the system proxy)",
-    "saveFailed": "Could not save settings: {{error}}"
+    "saveFailed": "Could not save settings: {{error}}",
+    "pigger": {
+      "title": "Sync to Pigger",
+      "hint": "Sends this computer's usage to the AI usage page of your Pigger panel",
+      "enabled": "Sync automatically",
+      "enabledHint": "Every 10 minutes while Pigger Switch runs, with the full history once a day",
+      "needsSetup": "Fill in the panel address and token below first",
+      "url": "Panel address",
+      "urlHint": "Your Pigger panel's address with its path, as shown by Connect a computer on the AI usage page",
+      "token": "Token",
+      "tokenHint": "Made by Connect a computer on the AI usage page; it can only upload usage",
+      "deviceName": "Computer name",
+      "deviceNameHint": "How this computer is listed in Pigger",
+      "status": "Last sync",
+      "syncing": "Syncing…",
+      "synced": "{{time}} · {{rows}} daily rows, {{sessions}} sessions",
+      "failed": "Failed {{time}}: {{error}}",
+      "never": "Not synced yet",
+      "syncNow": "Sync now",
+      "syncDone": "Synced to Pigger: {{rows}} daily rows, {{sessions}} sessions",
+      "syncFailed": "Could not sync to Pigger: {{error}}"
+    }
   },
   "usage": {
     "subtitle": "Token usage and API-equivalent cost of Claude Code and Codex, read from their local session logs",

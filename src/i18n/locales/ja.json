@@ -60,7 +60,28 @@
     "network": "ネットワーク",
     "networkHint": "Anthropic・OpenAI へのプラン上限の問い合わせにのみ使用",
     "proxyUrl": "プロキシ（空欄でシステムのプロキシに従う）",
-    "saveFailed": "設定を保存できませんでした：{{error}}"
+    "saveFailed": "設定を保存できませんでした：{{error}}",
+    "pigger": {
+      "title": "Pigger に同期",
+      "hint": "このコンピューターの使用量を Pigger パネルの「AI 使用量」ページに送ります",
+      "enabled": "自動で同期",
+      "enabledHint": "Pigger Switch の実行中は 10 分ごとに送り、1 日 1 回は全履歴を送り直します",
+      "needsSetup": "先に下のパネルの URL とトークンを入力してください",
+      "url": "パネルの URL",
+      "urlHint": "Pigger パネルの URL（パネルのパスを含む）。AI 使用量ページの「コンピューターを接続」に表示されます",
+      "token": "トークン",
+      "tokenHint": "AI 使用量ページの「コンピューターを接続」で作成します。使用量のアップロードしかできません",
+      "deviceName": "コンピューター名",
+      "deviceNameHint": "Pigger でのこのコンピューターの表示名",
+      "status": "前回の同期",
+      "syncing": "同期中…",
+      "synced": "{{time}} · 日別 {{rows}} 行、セッション {{sessions}} 件",
+      "failed": "{{time}}に失敗しました：{{error}}",
+      "never": "まだ同期していません",
+      "syncNow": "今すぐ同期",
+      "syncDone": "Pigger に同期しました：日別 {{rows}} 行、セッション {{sessions}} 件",
+      "syncFailed": "Pigger に同期できませんでした：{{error}}"
+    }
   },
   "usage": {
     "subtitle": "Claude Code と Codex のトークン使用量と API 価格換算のコスト（ローカルのセッションログから集計）",

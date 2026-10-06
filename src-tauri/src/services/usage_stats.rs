@@ -291,14 +291,14 @@ fn dedup_app_type_match_sql(left: &str, right: &str) -> String {
 /// 注意：包裹后该列上的索引在此比较中失效，但这些都是已带时间过滤的聚合扫描，
 /// app_type 本就不是主访问路径，可接受。仅用于读侧；跨源去重使用更窄的
 /// [`dedup_app_type_match_sql`]，额度检查（`check_provider_limits`）仍保留原始精确比较。
-fn folded_app_type_sql(column: &str) -> String {
+pub(crate) fn folded_app_type_sql(column: &str) -> String {
     format!("CASE WHEN {column} = 'claude-desktop' THEN 'claude' ELSE {column} END")
 }
 
 /// SQL 标量表达式：行的「有效计价模型」—— pricing_model 非空优先，NULL/'' 回落
 /// model。这是 `get_model_stats` 的分组键，也是 Dashboard 模型筛选的匹配口径：
 /// 筛选值来自模型统计列表，两边必须用同一表达式才能选得中。
-fn effective_model_sql(alias: &str) -> String {
+pub(crate) fn effective_model_sql(alias: &str) -> String {
     format!("COALESCE(NULLIF({alias}.pricing_model, ''), {alias}.model)")
 }
 

@@ -60,7 +60,28 @@
     "network": "網路",
     "networkHint": "只用於向 Anthropic、OpenAI 查詢訂閱額度",
     "proxyUrl": "代理（留空則跟隨系統代理）",
-    "saveFailed": "儲存設定失敗：{{error}}"
+    "saveFailed": "儲存設定失敗：{{error}}",
+    "pigger": {
+      "title": "同步到 Pigger",
+      "hint": "把這台電腦的用量推送到 Pigger 面板的「AI 用量」頁",
+      "enabled": "自動同步",
+      "enabledHint": "Pigger Switch 執行時每 10 分鐘推送一次，每天把全部歷史重送一遍",
+      "needsSetup": "先在下面填好面板網址和權杖",
+      "url": "面板網址",
+      "urlHint": "Pigger 面板的網址（含面板路徑），AI 用量頁的「連接電腦」裡能看到",
+      "token": "權杖",
+      "tokenHint": "在 AI 用量頁的「連接電腦」產生，只能上傳用量",
+      "deviceName": "電腦名稱",
+      "deviceNameHint": "這台電腦在 Pigger 上顯示的名字",
+      "status": "上次同步",
+      "syncing": "正在同步…",
+      "synced": "{{time}} · {{rows}} 列每日用量、{{sessions}} 個對話",
+      "failed": "{{time}}同步失敗：{{error}}",
+      "never": "尚未同步",
+      "syncNow": "立即同步",
+      "syncDone": "已同步到 Pigger：{{rows}} 列每日用量、{{sessions}} 個對話",
+      "syncFailed": "同步到 Pigger 失敗：{{error}}"
+    }
   },
   "usage": {
     "subtitle": "Claude Code 與 Codex 的 token 用量與按 API 價格折算的花費，讀自本機對話日誌",

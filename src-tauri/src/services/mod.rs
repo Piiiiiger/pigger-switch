@@ -1,6 +1,7 @@
 pub mod alerts;
 pub mod http_client;
 pub mod model_pricing;
+pub mod pigger_sync;
 pub mod session_usage;
 pub mod session_usage_codex;
 pub mod sql_helpers;
