@@ -98,47 +98,97 @@ fn start_pigger_sync(app: tauri::AppHandle) {
     });
 }
 
-/// `pigger-switch --sync-once`：不开窗口，扫一遍会话日志、查一次额度，
-/// 把全部用量推到 Pigger 后返回退出码（给没有桌面的机器配定时任务用）
-pub fn sync_once() -> i32 {
+/// 命令行模式共用的准备：TLS、网络代理、数据库、异步运行时
+fn cli_setup() -> Result<(Arc<Database>, tokio::runtime::Runtime), i32> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let settings = settings::get_settings();
-    if !settings.pigger_sync_enabled {
-        eprintln!("同步到 Pigger 没有打开：先在 设置 → 同步到 Pigger 里填好并打开");
-        return 2;
-    }
     if let Err(e) = services::http_client::apply_proxy(settings.network_proxy_url.as_deref()) {
         eprintln!("网络代理无效，改用系统代理: {e}");
         let _ = services::http_client::apply_proxy(None);
     }
-    let db = match Database::init() {
-        Ok(db) => Arc::new(db),
-        Err(e) => {
-            eprintln!("打开用量数据库失败: {e}");
-            return 1;
+    let db = Database::init().map(Arc::new).map_err(|e| {
+        eprintln!("打开用量数据库失败: {e}");
+        1
+    })?;
+    let runtime = tokio::runtime::Runtime::new().map_err(|e| {
+        eprintln!("启动失败: {e}");
+        1
+    })?;
+    Ok((db, runtime))
+}
+
+/// 扫一遍会话日志，让命令行算的数跟上日志
+async fn cli_scan(db: &Arc<Database>) {
+    let scan_db = db.clone();
+    let scan =
+        tokio::task::spawn_blocking(move || services::session_usage::sync_all_unlocked(&scan_db));
+    if let Ok(result) = scan.await {
+        for error in &result.errors {
+            eprintln!("扫描会话日志: {error}");
         }
-    };
-    let runtime = match tokio::runtime::Runtime::new() {
-        Ok(runtime) => runtime,
-        Err(e) => {
-            eprintln!("启动失败: {e}");
-            return 1;
-        }
+    }
+}
+
+/// `pigger-switch --limits claude|codex`：扫日志、查一次额度并记下，
+/// 把每个额度窗口的估算和过去的窗口打成 JSON
+pub fn print_limits(tool: &str) -> i32 {
+    if !matches!(tool, "claude" | "codex") {
+        eprintln!("用法：pigger-switch --limits claude|codex");
+        return 2;
+    }
+    let (db, runtime) = match cli_setup() {
+        Ok(ready) => ready,
+        Err(code) => return code,
     };
     runtime.block_on(async move {
-        let scan_db = db.clone();
-        let scan = tokio::task::spawn_blocking(move || {
-            services::session_usage::sync_all_unlocked(&scan_db)
-        });
-        if let Ok(result) = scan.await {
-            for error in &result.errors {
-                eprintln!("扫描会话日志: {error}");
+        cli_scan(&db).await;
+        let quota = match services::subscription::get_subscription_quota(tool).await {
+            Ok(quota) => {
+                services::alerts::record_quota_snapshot(&db, tool, &quota);
+                Some(quota)
+            }
+            Err(e) => {
+                eprintln!("查询 {tool} 额度失败，只用记下的读数: {e}");
+                None
+            }
+        };
+        let now = chrono::Utc::now().timestamp();
+        match services::quota_windows::build_report(&db, tool, quota.as_ref(), now) {
+            Ok(report) => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report).unwrap_or_default()
+                );
+                0
+            }
+            Err(e) => {
+                eprintln!("估算额度失败: {e}");
+                1
             }
         }
+    })
+}
+
+/// `pigger-switch --sync-once`：不开窗口，扫一遍会话日志、查一次额度，
+/// 把全部用量推到 Pigger 后返回退出码（给没有桌面的机器配定时任务用）
+pub fn sync_once() -> i32 {
+    if !settings::get_settings().pigger_sync_enabled {
+        eprintln!("同步到 Pigger 没有打开：先在 设置 → 同步到 Pigger 里填好并打开");
+        return 2;
+    }
+    let (db, runtime) = match cli_setup() {
+        Ok(ready) => ready,
+        Err(code) => return code,
+    };
+    runtime.block_on(async move {
+        cli_scan(&db).await;
         let mut quotas = Vec::new();
         for tool in services::alerts::TOOLS {
             match services::subscription::get_subscription_quota(tool).await {
-                Ok(quota) => quotas.extend(services::pigger_sync::report_quota(&quota)),
+                Ok(quota) => {
+                    services::alerts::record_quota_snapshot(&db, tool, &quota);
+                    quotas.extend(services::pigger_sync::report_quota(&quota));
+                }
                 Err(e) => eprintln!("查询 {tool} 额度失败: {e}"),
             }
         }
@@ -384,6 +434,7 @@ pub fn run() {
             commands::record_models_dev_sync_result,
             // subscription quota
             commands::get_subscription_quota,
+            commands::get_quota_windows,
             // sync to Pigger
             commands::get_pigger_sync_status,
             commands::sync_pigger_now,

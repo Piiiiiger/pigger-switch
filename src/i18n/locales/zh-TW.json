@@ -84,7 +84,6 @@
     }
   },
   "usage": {
-    "subtitle": "Claude Code 與 Codex 的 token 用量與按 API 價格折算的花費，讀自本機對話日誌",
     "presetToday": "當天",
     "preset1d": "近 24 小時",
     "preset7d": "近 7 天",
@@ -106,10 +105,6 @@
     "cacheReadTokens": "快取命中",
     "requestModel": "請求模型",
     "noData": "暫無資料",
-    "appFilter": {
-      "all": "全部",
-      "label": "依應用程式篩選"
-    },
     "rawInputLabel": "原始",
     "sessionSync": {
       "syncNow": "立即同步",
@@ -272,7 +267,6 @@
     "tabs": {
       "label": "明細",
       "models": "模型",
-      "pricing": "定價",
       "projects": "專案",
       "sessions": "對話",
       "activity": "活躍時段"
@@ -326,7 +320,7 @@
     },
     "empty": {
       "title": "還沒有用量資料",
-      "body": "用一下 Claude Code 或 Codex，一分鐘內用量就會出現在這裡。以前用過的話請點「立即同步」。",
+      "body": "用一下 {{app}}，一分鐘內用量就會出現在這裡。之前用過的話，點「立即同步」。",
       "configurePricing": "設定模型定價"
     },
     "pricing": {
@@ -379,7 +373,11 @@
     },
     "daysAgo_other": "{{count}} 天前",
     "hoursAgo_other": "{{count}} 小時前",
-    "minutesAgo_other": "{{count}} 分鐘前"
+    "minutesAgo_other": "{{count}} 分鐘前",
+    "subtitle": {
+      "claude": "Claude Code 的 token 用量與按 API 價格折算的花費，讀自本機的對話日誌",
+      "codex": "Codex 的 token 用量與按 API 價格折算的花費，讀自本機的對話日誌"
+    }
   },
   "errors": {
     "frontendCrashTitle": "介面遇到了問題",
@@ -403,15 +401,13 @@
     "usage": "用量統計",
     "settings": "設定",
     "limits": "訂閱額度",
-    "today": "今天",
-    "thisMonth": "本月"
+    "prices": "模型價格",
+    "todayCost": "{{app}} 今日花費",
+    "overDailyBudget": "已超出每日預算",
+    "overMonthlyBudget": "已超出每月預算"
   },
   "limits": {
-    "title": "訂閱額度",
-    "subtitle": "Claude（Pro / Max）與 ChatGPT 訂閱在各個限額視窗中已使用多少。讀取本機 Claude Code、Codex 的登入資訊，只查詢，不做任何變更。",
     "refresh": "重新整理",
-    "usedPercent": "已用 {{value}}%",
-    "resetsIn": "{{countdown}} 後重置 · {{time}}",
     "resetUnknown": "重置時間未知",
     "noWindows": "這個方案沒有傳回限額視窗。",
     "notSignedIn": {
@@ -446,6 +442,58 @@
       "seven_day_sonnet": "Sonnet",
       "seven_day_fable": "Fable",
       "30_day": "30 天"
+    },
+    "intro": {
+      "claude": "Claude 訂閱（Pro / Max）的每個限額視窗用了多少，折合多少美元和 token。讀的是本機 Claude Code 的登入，不改動任何東西。",
+      "codex": "ChatGPT 訂閱裡 Codex 的每個限額視窗用了多少，折合多少美元和 token。讀的是本機 Codex 的登入，不改動任何東西。"
+    },
+    "estimateNote": {
+      "claude": "額度是估算的。訂閱只回報百分之幾，所以這裡拿本機 Claude Code 在這個視窗裡的用量（按 API 價格折算）除以這個百分比。claude.ai 網頁版和別的電腦上的使用也算進同一個額度，但這裡看不到，估出來會偏低。",
+      "codex": "額度是估算的。訂閱只回報百分之幾，所以這裡拿本機 Codex 在這個視窗裡的用量（按 API 價格折算）除以這個百分比。別的電腦和 Codex 雲端任務的使用也算進同一個額度，但這裡看不到，估出來會偏低。"
+    },
+    "readAt": "{{time}} 讀取",
+    "strip": {
+      "left": "約剩 {{cost}}"
+    },
+    "window": {
+      "reported": "已用",
+      "estimated": "已用（估算）",
+      "nowAbout": "現在約 {{value}}%",
+      "used": "已用",
+      "limit": "額度",
+      "remaining": "剩餘",
+      "resets": "重置",
+      "resetsIn": "{{countdown}} 後 · {{time}}",
+      "tokens": "{{value}} token",
+      "requests_other": "{{count}} 次請求",
+      "basisCurrent": "按本視窗的讀數 · {{low}}–{{high}}",
+      "basisTypical_other": "按最近 {{count}} 個視窗估算 · {{low}}–{{high}}",
+      "noEstimate": "這個視窗用得還太少，估不出額度",
+      "noResetTime": "訂閱沒給這個視窗的重置時間，量不出來",
+      "usedUp": "估計已經用完，要等重置",
+      "runsOutAt": "照這個速度，約 {{time}} 用完",
+      "projected": "照這個速度，到重置時約用到 {{value}}%",
+      "perFiveHour_other": "重置前還有 {{count}} 個 5 小時，每個約 {{cost}} · {{tokens}} token",
+      "usedElsewhere": "這個視窗的用量來自別處（本機沒有請求），估不出額度"
+    },
+    "history": {
+      "title": "歷史視窗",
+      "fiveHour": "5 小時視窗",
+      "weekly": "每週視窗",
+      "window": "視窗",
+      "requests": "請求",
+      "tokens": "Token",
+      "cost": "花費",
+      "share": "用到",
+      "limit": "額度（估算）",
+      "now": "目前",
+      "empty": "還沒有視窗，用起來就會出現。",
+      "inferredHint": "這個視窗沒有訂閱的讀數：開始時間是按其中第一個請求推算的",
+      "shareEstimated": "這個視窗沒有讀數：按典型額度折算",
+      "footnote": "「用到」是訂閱在每個視窗回報過的最高百分比。帶 ≈ 的視窗沒有讀數，是拿它的花費和典型額度比；當時額度不同（例如換過方案）時會超過 100%。* 開始時間按第一個請求推算。"
     }
+  },
+  "prices": {
+    "help": "兩個工具共用這一張價目表：應用程式裡的花費都是按這裡的 API 價格折算的。可以從 models.dev 同步。"
   }
 }

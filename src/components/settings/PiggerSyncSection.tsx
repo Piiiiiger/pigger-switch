@@ -4,7 +4,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Loader2, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
-import { useNow } from "@/components/limits/QuotaCard";
+import { useNow } from "@/components/limits/quota";
 import { formatRelativeTime } from "@/components/usage/format";
 import { piggerSyncApi, type AppSettings } from "@/lib/api/settings";
 import { toast } from "@/lib/toast";

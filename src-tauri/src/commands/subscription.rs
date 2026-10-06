@@ -1,5 +1,6 @@
 use tauri::{Emitter, State};
 
+use crate::error::AppError;
 use crate::services::subscription::SubscriptionQuota;
 use crate::store::AppState;
 
@@ -18,6 +19,26 @@ pub async fn get_subscription_quota(
     let quota = crate::services::subscription::get_subscription_quota(&tool).await?;
     crate::services::alerts::record_quota(&app, &state, &tool, &quota);
     Ok(quota)
+}
+
+/// 每个额度窗口的实际额度估算（本机用量 ÷ 接口给的百分比）和过去的窗口
+#[tauri::command]
+pub async fn get_quota_windows(
+    state: State<'_, AppState>,
+    tool: String,
+) -> Result<crate::services::quota_windows::QuotaWindowsReport, AppError> {
+    let quota = state.usage_cache.with_subscription(&tool, Clone::clone);
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::services::quota_windows::build_report(
+            &db,
+            &tool,
+            quota.as_ref(),
+            chrono::Utc::now().timestamp(),
+        )
+    })
+    .await
+    .map_err(|e| AppError::Message(format!("估算额度失败: {e}")))?
 }
 
 /// 把额度快照放进缓存、通知前端和托盘（命令和后台刷新共用）

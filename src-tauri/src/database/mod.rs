@@ -6,11 +6,12 @@
 //! ├── schema.rs  - 表结构定义 + 默认模型定价
 //! ├── backup.rs  - 破坏性操作前的安全备份
 //! ├── import.rs  - 从 CC Switch 数据库导入历史用量
-//! └── dao/       - 数据访问对象（设置、日聚合）
+//! └── dao/       - 数据访问对象（设置、日聚合、订阅额度读数）
 //! ```
 
 pub(crate) mod backup;
 mod dao;
+pub(crate) use dao::quota_snapshots::{parse_reset_minute, QuotaSnapshot};
 pub(crate) mod import;
 mod schema;
 

@@ -14,11 +14,13 @@ import { HelpTip } from "@/components/ui/help-tip";
 import { Switch } from "@/components/ui/switch";
 import { useAppInfo } from "@/hooks/useSettings";
 import { APP_DISPLAY_NAME } from "@/components/shell/AppGlyph";
-import { KNOWN_APP_TYPES } from "@/types/usage";
+import { KNOWN_APP_TYPES, type AppType } from "@/types/usage";
 import { cn } from "@/lib/utils";
 import { getResolvedLang, joinNames } from "./format";
 
 interface UsageDataSourcesSheetProps {
+  /** 只列这个工具的日志目录；Codex 用量维护只在 Codex 的页里 */
+  tool: AppType;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   sessionAutoSyncEnabled: boolean;
@@ -94,8 +96,9 @@ function DirectoryRow({
   );
 }
 
-/** 「数据来源」抽屉：会话日志扫描、日志目录、Codex 用量维护。 */
+/** 「数据来源」抽屉：会话日志扫描、这个工具的日志目录、Codex 用量维护。 */
 export function UsageDataSourcesSheet({
+  tool,
   open,
   onOpenChange,
   sessionAutoSyncEnabled,
@@ -173,16 +176,19 @@ export function UsageDataSourcesSheet({
             }}
           >
             <ul className="m-0 flex list-none flex-col gap-1.5 rounded-control bg-subtle px-3 py-2.5 text-caption">
-              <DirectoryRow
-                label="Claude Code"
-                path={info?.claudeDir}
-                exists={info?.claudeDirExists}
-              />
-              <DirectoryRow
-                label="Codex"
-                path={info?.codexDir}
-                exists={info?.codexDirExists}
-              />
+              {tool === "claude" ? (
+                <DirectoryRow
+                  label="Claude Code"
+                  path={info?.claudeDir}
+                  exists={info?.claudeDirExists}
+                />
+              ) : (
+                <DirectoryRow
+                  label="Codex"
+                  path={info?.codexDir}
+                  exists={info?.codexDirExists}
+                />
+              )}
             </ul>
             {onOpenSettings && (
               <button
@@ -199,31 +205,33 @@ export function UsageDataSourcesSheet({
             )}
           </SourceCard>
 
-          <SourceCard
-            title={t("usage.rebuildCodex.title")}
-            help={{
-              title: t("usage.sources.codexHelpTitle"),
-              body: t("usage.rebuildCodex.description"),
-            }}
-          >
-            <p className="m-0 text-caption text-fg-2">
-              {t("usage.rebuildCodex.warning")}
-            </p>
-            <div className="flex justify-end">
-              <Button
-                type="button"
-                variant="neutral"
-                size="compact"
-                disabled={rebuildingCodex}
-                onClick={onRebuildCodex}
-              >
-                {rebuildingCodex && (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                )}
-                {t("usage.rebuildCodex.actionEllipsis")}
-              </Button>
-            </div>
-          </SourceCard>
+          {tool === "codex" && (
+            <SourceCard
+              title={t("usage.rebuildCodex.title")}
+              help={{
+                title: t("usage.sources.codexHelpTitle"),
+                body: t("usage.rebuildCodex.description"),
+              }}
+            >
+              <p className="m-0 text-caption text-fg-2">
+                {t("usage.rebuildCodex.warning")}
+              </p>
+              <div className="flex justify-end">
+                <Button
+                  type="button"
+                  variant="neutral"
+                  size="compact"
+                  disabled={rebuildingCodex}
+                  onClick={onRebuildCodex}
+                >
+                  {rebuildingCodex && (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  )}
+                  {t("usage.rebuildCodex.actionEllipsis")}
+                </Button>
+              </div>
+            </SourceCard>
+          )}
         </SheetBody>
       </SheetContent>
     </Sheet>

@@ -48,3 +48,66 @@ export interface SubscriptionQuota {
 }
 
 export type QuotaTool = "claude" | "codex";
+
+/** 本机一段时间里的用量（输入不含缓存） */
+export interface WindowUsage {
+  requests: number;
+  costUsd: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  totalTokens: number;
+}
+
+/** current：本窗口自己的读数；typical：最近几个窗口的中位数 */
+export type EstimateBasis = "current" | "typical";
+
+/** 窗口总额度的估算（本机用量 ÷ 接口给的百分比），带可能的范围 */
+export interface LimitEstimate {
+  costUsd: number;
+  costLow: number;
+  costHigh: number;
+  tokens: number;
+  tokensLow: number;
+  tokensHigh: number;
+  basis: EstimateBasis;
+  windows: number;
+}
+
+/** 当前的一个额度窗口（时间为 Unix 秒） */
+export interface CurrentWindow {
+  tier: string;
+  start: number | null;
+  end: number | null;
+  reportedUtilization: number | null;
+  reportedAt: number | null;
+  estimatedUtilization: number | null;
+  used: WindowUsage;
+  limit: LimitEstimate | null;
+  remainingCostUsd: number | null;
+  remainingTokens: number | null;
+  projectedUtilization: number | null;
+  exhaustsAt: number | null;
+  fiveHourWindowsLeft: number | null;
+  perFiveHourCostUsd: number | null;
+  perFiveHourTokens: number | null;
+}
+
+/** 过去（和当前）的一个窗口；exact 为假时边界是按本机请求推算的 */
+export interface PastWindow {
+  start: number;
+  end: number;
+  exact: boolean;
+  current: boolean;
+  used: WindowUsage;
+  peakUtilization: number | null;
+  limit: LimitEstimate | null;
+}
+
+export interface QuotaWindowsReport {
+  tool: string;
+  windows: CurrentWindow[];
+  fiveHourHistory: PastWindow[];
+  weeklyHistory: PastWindow[];
+}

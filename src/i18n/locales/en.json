@@ -84,7 +84,6 @@
     }
   },
   "usage": {
-    "subtitle": "Token usage and API-equivalent cost of Claude Code and Codex, read from their local session logs",
     "presetToday": "Today",
     "preset1d": "Last 24 hours",
     "preset7d": "Last 7 days",
@@ -106,10 +105,6 @@
     "cacheReadTokens": "Cache Hit",
     "requestModel": "Request Model",
     "noData": "No data",
-    "appFilter": {
-      "all": "All",
-      "label": "Filter by app"
-    },
     "rawInputLabel": "Raw",
     "sessionSync": {
       "syncNow": "Sync Now",
@@ -272,7 +267,6 @@
     "tabs": {
       "label": "Details",
       "models": "Models",
-      "pricing": "Pricing",
       "projects": "Projects",
       "sessions": "Sessions",
       "activity": "Active hours"
@@ -326,7 +320,7 @@
     },
     "empty": {
       "title": "No usage data yet",
-      "body": "Use Claude Code or Codex and the usage shows up here within a minute. If you used them before, click Sync Now.",
+      "body": "Use {{app}} and its usage shows up here within a minute. If you used it before, click Sync Now.",
       "configurePricing": "Configure model pricing"
     },
     "pricing": {
@@ -382,7 +376,11 @@
     "hoursAgo_one": "{{count}} hr ago",
     "hoursAgo_other": "{{count}} hr ago",
     "minutesAgo_one": "{{count}} min ago",
-    "minutesAgo_other": "{{count}} min ago"
+    "minutesAgo_other": "{{count}} min ago",
+    "subtitle": {
+      "claude": "Token usage and API-equivalent cost of Claude Code, read from its session logs on this computer",
+      "codex": "Token usage and API-equivalent cost of Codex, read from its session logs on this computer"
+    }
   },
   "errors": {
     "frontendCrashTitle": "Something went wrong in the interface",
@@ -406,15 +404,13 @@
     "usage": "Usage",
     "settings": "Settings",
     "limits": "Plan limits",
-    "today": "Today",
-    "thisMonth": "This month"
+    "prices": "Model prices",
+    "todayCost": "{{app}} today",
+    "overDailyBudget": "Over today's budget",
+    "overMonthlyBudget": "Over this month's budget"
   },
   "limits": {
-    "title": "Plan limits",
-    "subtitle": "How much of your Claude (Pro / Max) and ChatGPT plan you have used in each rate-limit window. Read from the logins of Claude Code and Codex on this computer; nothing is changed.",
     "refresh": "Refresh",
-    "usedPercent": "{{value}}% used",
-    "resetsIn": "Resets in {{countdown}} · {{time}}",
     "resetUnknown": "Reset time unknown",
     "noWindows": "No rate-limit windows were returned for this plan.",
     "notSignedIn": {
@@ -449,6 +445,61 @@
       "seven_day_sonnet": "Sonnet",
       "seven_day_fable": "Fable",
       "30_day": "30d"
+    },
+    "intro": {
+      "claude": "How much of your Claude plan (Pro / Max) each rate-limit window has used, and what that comes to in dollars and tokens. Read from Claude Code's login on this computer; nothing is changed.",
+      "codex": "How much of your ChatGPT plan's Codex limits each window has used, and what that comes to in dollars and tokens. Read from Codex's login on this computer; nothing is changed."
+    },
+    "estimateNote": {
+      "claude": "Limits are estimates. The plan only reports a percentage, so the limit is this computer's Claude Code usage in the window (at API prices) divided by that percentage. Use on claude.ai or other computers counts toward the same limit but not here, which makes the estimate low.",
+      "codex": "Limits are estimates. The plan only reports a percentage, so the limit is this computer's Codex usage in the window (at API prices) divided by that percentage. Codex used elsewhere (other computers, Codex cloud tasks) counts toward the same limit but not here, which makes the estimate low."
+    },
+    "readAt": "Read at {{time}}",
+    "strip": {
+      "left": "≈ {{cost}} left"
+    },
+    "window": {
+      "reported": "used",
+      "estimated": "used (estimated)",
+      "nowAbout": "≈ {{value}}% now",
+      "used": "Used",
+      "limit": "Limit",
+      "remaining": "Left",
+      "resets": "Resets",
+      "resetsIn": "in {{countdown}} · {{time}}",
+      "tokens": "{{value}} tokens",
+      "requests_one": "{{count}} request",
+      "requests_other": "{{count}} requests",
+      "basisCurrent": "from this window · {{low}}–{{high}}",
+      "basisTypical_one": "from the previous window · {{low}}–{{high}}",
+      "basisTypical_other": "median of the last {{count}} windows · {{low}}–{{high}}",
+      "noEstimate": "Not enough usage in this window yet to estimate its limit",
+      "noResetTime": "The plan gave no reset time for this window, so it can't be measured",
+      "usedUp": "Probably used up until the reset",
+      "runsOutAt": "At this pace it runs out around {{time}}",
+      "projected": "At this pace: about {{value}}% by the reset",
+      "perFiveHour_one": "≈ {{cost}} · {{tokens}} tokens for the last 5 hours before the reset",
+      "perFiveHour_other": "≈ {{cost}} · {{tokens}} tokens per 5 hours for the {{count}} left",
+      "usedElsewhere": "Used elsewhere (no requests on this computer), so no estimate"
+    },
+    "history": {
+      "title": "Past windows",
+      "fiveHour": "5-hour windows",
+      "weekly": "Weekly windows",
+      "window": "Window",
+      "requests": "Requests",
+      "tokens": "Tokens",
+      "cost": "Cost",
+      "share": "Used",
+      "limit": "Limit (est.)",
+      "now": "Now",
+      "empty": "No windows yet. They appear as you use the tool.",
+      "inferredHint": "No plan reading for this window: its start is inferred from your first request in it",
+      "shareEstimated": "No reading for this window: measured against the typical limit",
+      "footnote": "Used is the highest percentage the plan reported in each window. ≈ means no reading for that window: its cost compared with the typical limit, which passes 100% if the limit was different then (another plan). * Start inferred from the first request."
     }
+  },
+  "prices": {
+    "help": "One price table for both tools. Every cost in the app is what the tokens would cost at these API prices. Prices can sync from models.dev."
   }
 }

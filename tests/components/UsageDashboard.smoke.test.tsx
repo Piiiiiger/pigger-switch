@@ -47,6 +47,7 @@ vi.mock("@/lib/api/usage", () => ({ usageApi: usageApiMock }));
 
 vi.mock("@/lib/query/subscription", () => ({
   useSubscriptionQuota: () => ({ data: undefined }),
+  useQuotaWindows: () => ({ data: undefined }),
 }));
 
 const summary = {
@@ -160,15 +161,15 @@ describe("UsageDashboard (smoke)", () => {
     });
     render(
       <QueryClientProvider client={client}>
-        <UsageDashboard />
+        <UsageDashboard tool="claude" />
       </QueryClientProvider>,
     );
 
     // 指标卡
     expect(await screen.findByText("$42.10")).toBeInTheDocument();
     expect(screen.getByText("18.2M")).toBeInTheDocument();
-    // 「全部」时由各应用的 token 重新算：16.6M ÷ (1M + 0.2M + 16.6M)
-    expect(screen.getByText("93.3%")).toBeInTheDocument();
+    // 一个工具的页用后端给这个工具算好的命中率
+    expect(screen.getByText("71.6%")).toBeInTheDocument();
     expect(screen.getByText("usage.trend.title")).toBeInTheDocument();
 
     // 更多指标
@@ -215,12 +216,35 @@ describe("UsageDashboard (smoke)", () => {
     await user.click(screen.getByRole("tab", { name: "usage.tabs.models" }));
     expect(await screen.findByText("kimi-k2.6")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("tab", { name: "usage.tabs.pricing" }));
-    expect(await screen.findByText("DeepSeek V4 Pro")).toBeInTheDocument();
-    expect(screen.getByText("$1.32")).toBeInTheDocument();
-    expect(screen.getByText("$0.044")).toBeInTheDocument();
+    // 价格是两个工具共用的，不在任何一个工具的页里
     expect(
-      await screen.findByText("usage.pricing.modelsDevTitle"),
-    ).toBeInTheDocument();
+      screen.queryByRole("tab", { name: "usage.tabs.pricing" }),
+    ).not.toBeInTheDocument();
+  });
+
+  // Codex 的页只问 Codex 的数：没有「全部 / Claude」切换，每个查询都带着 codex
+  it("keeps a tool's page to that tool alone", async () => {
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    render(
+      <QueryClientProvider client={client}>
+        <UsageDashboard tool="codex" />
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByText("Codex")).toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: /appFilter/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Claude Code" })).toBeNull();
+    await screen.findByText("usage.trend.title");
+    expect(usageApiMock.getUsageSummary).toHaveBeenCalledWith(
+      undefined,
+      undefined,
+      "codex",
+    );
+    expect(usageApiMock.getProjectStats).toHaveBeenCalled();
+    for (const call of usageApiMock.getProjectStats.mock.calls) {
+      expect(call[2]).toBe("codex");
+    }
   });
 });

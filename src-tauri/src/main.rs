@@ -2,9 +2,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    // 不开窗口推一次用量到 Pigger（给定时任务用）
-    if std::env::args().any(|arg| arg == "--sync-once") {
+    // 不开窗口的命令：推一次用量到 Pigger（给定时任务用）；打出额度窗口的估算
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|arg| arg == "--sync-once") {
         std::process::exit(pigger_switch_lib::sync_once());
+    }
+    if let Some(at) = args.iter().position(|arg| arg == "--limits") {
+        let tool = args.get(at + 1).map(String::as_str).unwrap_or("");
+        std::process::exit(pigger_switch_lib::print_limits(tool));
     }
 
     // 在 Linux 上设置 WebKit 环境变量以解决 DMA-BUF 渲染问题

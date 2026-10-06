@@ -84,7 +84,6 @@
     }
   },
   "usage": {
-    "subtitle": "Claude Code と Codex のトークン使用量と API 価格換算のコスト（ローカルのセッションログから集計）",
     "presetToday": "当日",
     "preset1d": "過去 24 時間",
     "preset7d": "過去 7 日間",
@@ -106,10 +105,6 @@
     "cacheReadTokens": "キャッシュヒット",
     "requestModel": "リクエストモデル",
     "noData": "データなし",
-    "appFilter": {
-      "all": "すべて",
-      "label": "アプリで絞り込み"
-    },
     "rawInputLabel": "原始",
     "sessionSync": {
       "syncNow": "今すぐ同期",
@@ -272,7 +267,6 @@
     "tabs": {
       "label": "明細",
       "models": "モデル",
-      "pricing": "料金",
       "projects": "プロジェクト",
       "sessions": "セッション",
       "activity": "利用時間帯"
@@ -326,7 +320,7 @@
     },
     "empty": {
       "title": "使用量データはまだありません",
-      "body": "Claude Code または Codex を使うと、1 分以内にここに使用量が表示されます。以前使っていた場合は「今すぐ同期」をクリックしてください。",
+      "body": "{{app}} を使うと、1 分以内にここに使用量が表示されます。以前に使っていた場合は「今すぐ同期」を押してください。",
       "configurePricing": "モデル料金を設定"
     },
     "pricing": {
@@ -379,7 +373,11 @@
     },
     "daysAgo_other": "{{count}} 日前",
     "hoursAgo_other": "{{count}} 時間前",
-    "minutesAgo_other": "{{count}} 分前"
+    "minutesAgo_other": "{{count}} 分前",
+    "subtitle": {
+      "claude": "Claude Code のトークン使用量と API 価格換算のコスト（このコンピューターのセッションログから集計）",
+      "codex": "Codex のトークン使用量と API 価格換算のコスト（このコンピューターのセッションログから集計）"
+    }
   },
   "errors": {
     "frontendCrashTitle": "画面で問題が発生しました",
@@ -403,15 +401,13 @@
     "usage": "使用量",
     "settings": "設定",
     "limits": "プラン上限",
-    "today": "今日",
-    "thisMonth": "今月"
+    "prices": "モデル価格",
+    "todayCost": "{{app}} の今日の費用",
+    "overDailyBudget": "今日の予算を超えました",
+    "overMonthlyBudget": "今月の予算を超えました"
   },
   "limits": {
-    "title": "プラン上限",
-    "subtitle": "Claude（Pro / Max）と ChatGPT プランを各レート制限枠でどれだけ使ったか。このコンピューターの Claude Code・Codex のログイン情報を読み取るだけで、何も変更しません。",
     "refresh": "更新",
-    "usedPercent": "{{value}}% 使用",
-    "resetsIn": "{{countdown}} 後にリセット · {{time}}",
     "resetUnknown": "リセット時刻は不明",
     "noWindows": "このプランの制限枠は返されませんでした。",
     "notSignedIn": {
@@ -446,6 +442,58 @@
       "seven_day_sonnet": "Sonnet",
       "seven_day_fable": "Fable",
       "30_day": "30日"
+    },
+    "intro": {
+      "claude": "Claude のプラン（Pro / Max）の各制限ウィンドウをどれだけ使ったか、ドルとトークンでどのくらいかを表示します。このコンピューターの Claude Code のログインを読むだけで、何も変更しません。",
+      "codex": "ChatGPT プランの Codex の各制限ウィンドウをどれだけ使ったか、ドルとトークンでどのくらいかを表示します。このコンピューターの Codex のログインを読むだけで、何も変更しません。"
+    },
+    "estimateNote": {
+      "claude": "上限は推定値です。プランは割合しか返さないため、このコンピューターの Claude Code のウィンドウ内の使用量（API 価格換算）をその割合で割って求めています。claude.ai や他のコンピューターでの利用も同じ上限に数えられますがここには表れないため、推定は低めになります。",
+      "codex": "上限は推定値です。プランは割合しか返さないため、このコンピューターの Codex のウィンドウ内の使用量（API 価格換算）をその割合で割って求めています。他のコンピューターや Codex クラウドタスクでの利用も同じ上限に数えられますがここには表れないため、推定は低めになります。"
+    },
+    "readAt": "{{time}} に取得",
+    "strip": {
+      "left": "残り 約 {{cost}}"
+    },
+    "window": {
+      "reported": "使用済み",
+      "estimated": "使用済み（推定）",
+      "nowAbout": "現在 約 {{value}}%",
+      "used": "使用",
+      "limit": "上限",
+      "remaining": "残り",
+      "resets": "リセット",
+      "resetsIn": "{{countdown}} 後 · {{time}}",
+      "tokens": "{{value}} トークン",
+      "requests_other": "{{count}} 件のリクエスト",
+      "basisCurrent": "このウィンドウから · {{low}}–{{high}}",
+      "basisTypical_other": "直近 {{count}} ウィンドウから推定 · {{low}}–{{high}}",
+      "noEstimate": "このウィンドウの使用量がまだ少なく、上限を推定できません",
+      "noResetTime": "このウィンドウのリセット時刻がないため測定できません",
+      "usedUp": "リセットまで使い切った見込みです",
+      "runsOutAt": "このペースだと {{time}} ごろ上限に達します",
+      "projected": "このペースだとリセット時に約 {{value}}%",
+      "perFiveHour_other": "リセットまで 5 時間 × {{count}}、各 約 {{cost}} · {{tokens}} トークン",
+      "usedElsewhere": "このウィンドウの使用は他の場所のもので（ここでのリクエストなし）、推定できません"
+    },
+    "history": {
+      "title": "過去のウィンドウ",
+      "fiveHour": "5 時間ウィンドウ",
+      "weekly": "週間ウィンドウ",
+      "window": "ウィンドウ",
+      "requests": "リクエスト",
+      "tokens": "トークン",
+      "cost": "コスト",
+      "share": "使用率",
+      "limit": "上限（推定）",
+      "now": "現在",
+      "empty": "まだウィンドウがありません。使い始めると表示されます。",
+      "inferredHint": "このウィンドウにはプランの読み取り値がなく、開始時刻は最初のリクエストから推定しています",
+      "shareEstimated": "読み取り値がないため、典型的な上限に対する割合です",
+      "footnote": "「使用率」は各ウィンドウでプランが返した最大の割合です。≈ は読み取り値のないウィンドウで、その費用を典型的な上限と比べた値です（当時の上限が違えば 100% を超えます）。* 開始時刻は最初のリクエストから推定。"
     }
+  },
+  "prices": {
+    "help": "両方のツールで共通の価格表です。アプリ内の費用はすべてこの API 価格で換算しています。models.dev から同期できます。"
   }
 }

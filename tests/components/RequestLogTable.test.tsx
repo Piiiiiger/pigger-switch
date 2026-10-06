@@ -225,7 +225,7 @@ describe("RequestLogTable", () => {
     expect(onOpenDetail).toHaveBeenCalledWith("short");
   });
 
-  it("shows project names with full paths on hover and short app names", () => {
+  it("shows project names with full paths on hover, and the app only when it varies", () => {
     useRequestLogsMock.mockReturnValue({
       data: {
         data: [
@@ -265,11 +265,52 @@ describe("RequestLogTable", () => {
     expect(screen.getByTitle("~/code/kimi-coding-plan")).toHaveTextContent(
       "kimi-coding-plan",
     );
-    // 应用列：短名 + 全名在悬停提示和读屏文字里
-    const appCell = screen.getByTitle("Claude Code");
-    expect(appCell).toHaveTextContent("Claude");
+    // 一个工具的页：每行都是同一个工具，不要「应用」这一列
+    expect(screen.queryByTitle("Claude Code")).toBeNull();
+    expect(screen.queryByText("usage.app")).toBeNull();
     expect(appShortName("claude-desktop")).toBe("Claude");
     expect(appShortName("unknown-app")).toBe("unknown-app");
+  });
+
+  it("names the app of each row when the rows span both tools", () => {
+    const row = (requestId: string, appType: string) => ({
+      requestId,
+      providerId: "_session",
+      project: "",
+      appType,
+      model: "m",
+      costMultiplier: "1",
+      inputTokens: 1,
+      outputTokens: 1,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      inputCostUsd: "0",
+      outputCostUsd: "0",
+      cacheReadCostUsd: "0",
+      cacheCreationCostUsd: "0",
+      totalCostUsd: "0",
+      isStreaming: false,
+      statusCode: 200,
+      latencyMs: 0,
+      createdAt: Math.floor(Date.now() / 1000),
+    });
+    useRequestLogsMock.mockReturnValue({
+      data: {
+        data: [row("r1", "claude-desktop"), row("r2", "codex")],
+        total: 2,
+        page: 0,
+        pageSize: 20,
+      },
+      isLoading: false,
+    });
+
+    render(
+      <RequestLogTable range={{ preset: "today" }} refreshIntervalMs={0} />,
+    );
+
+    // 短名在格子里，全名在悬停提示和读屏文字里
+    expect(screen.getByTitle("Claude Code")).toHaveTextContent("Claude");
+    expect(screen.getByTitle("Codex")).toHaveTextContent("Codex");
   });
 });
 

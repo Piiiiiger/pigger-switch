@@ -143,6 +143,27 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 
+        // 订阅额度读数：每个窗口每次看到的百分比，和本机用量一比就是窗口的实际额度
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS quota_snapshots (
+                tool TEXT NOT NULL,
+                tier TEXT NOT NULL,
+                resets_at INTEGER NOT NULL,
+                utilization REAL NOT NULL,
+                observed_at INTEGER NOT NULL,
+                plan TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (tool, tier, resets_at, observed_at)
+            )",
+            [],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_quota_snapshots_observed
+             ON quota_snapshots(observed_at)",
+            [],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+
         Ok(())
     }
 

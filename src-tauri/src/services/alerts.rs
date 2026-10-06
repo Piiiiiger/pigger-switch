@@ -31,10 +31,22 @@ pub fn record_quota(
     quota: &SubscriptionQuota,
 ) {
     crate::commands::publish_quota(app, state, tool, quota);
+    record_quota_snapshot(&state.db, tool, quota);
     if let Some(threshold) = crate::settings::get_settings().quota_alert_percent {
         if let Err(e) = check_quota_alert(app, &state.db, tool, quota, f64::from(threshold)) {
             log::warn!("检查额度提醒失败: {e}");
         }
+    }
+}
+
+/// 记下额度读数，额度页拿它和本机用量一起估每个窗口的实际额度
+pub fn record_quota_snapshot(db: &Database, tool: &str, quota: &SubscriptionQuota) {
+    let observed_at = quota
+        .queried_at
+        .map(|ms| ms / 1000)
+        .unwrap_or_else(|| chrono::Utc::now().timestamp());
+    if let Err(e) = db.record_quota_snapshot(tool, quota, observed_at) {
+        log::warn!("记录 {tool} 额度读数失败: {e}");
     }
 }
 

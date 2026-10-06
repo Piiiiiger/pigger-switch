@@ -1,4 +1,4 @@
-//! 系统托盘：今天 / 本月的用量摘要和订阅额度，一眼看完不用开窗口。
+//! 系统托盘：每个工具今天 / 本月的花费和订阅额度各占一块，一眼看完不用开窗口。
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -81,9 +81,6 @@ impl Texts {
             "No usage yet",
             "使用量はまだありません",
         )
-    }
-    fn over_budget(&self) -> &'static str {
-        self.pick("已超预算", "已超預算", "over budget", "予算超過")
     }
     fn show(&self) -> &'static str {
         self.pick(
@@ -191,19 +188,6 @@ pub fn tool_display_name(tool: &str) -> &'static str {
 
 // ─── 格式化 ──────────────────────────────────────────────────────────────────
 
-pub fn format_tokens(tokens: u64) -> String {
-    let value = tokens as f64;
-    if value >= 1e9 {
-        format!("{:.2}B", value / 1e9)
-    } else if value >= 1e6 {
-        format!("{:.1}M", value / 1e6)
-    } else if value >= 1e3 {
-        format!("{:.1}K", value / 1e3)
-    } else {
-        tokens.to_string()
-    }
-}
-
 pub fn format_usd(cost: f64) -> String {
     if cost >= 100.0 {
         format!("${cost:.0}")
@@ -212,16 +196,12 @@ pub fn format_usd(cost: f64) -> String {
     }
 }
 
-fn format_quota_line(texts: &Texts, tool: &str, quota: &SubscriptionQuota) -> Option<String> {
-    let mut name = tool_display_name(tool).to_string();
-    if let Some(plan) = &quota.plan {
-        name = format!("{name} {}", plan.label);
-    }
+/// 额度窗口那一行（「5h 34% · 7d 12%」）；没登录的工具没有这一行
+fn quota_windows_line(texts: &Texts, quota: &SubscriptionQuota) -> Option<String> {
     if !quota.success {
-        // 没登录（找不到凭据）的工具不占托盘位置
         return match quota.credential_status {
             crate::services::subscription::CredentialStatus::NotFound => None,
-            _ => Some(format!("{name} · {}", texts.login_needed())),
+            _ => Some(texts.login_needed().to_string()),
         };
     }
     let tiers: Vec<String> = quota
@@ -231,18 +211,53 @@ fn format_quota_line(texts: &Texts, tool: &str, quota: &SubscriptionQuota) -> Op
             format!("{} {:.0}%", texts.tier_label(&tier.name), tier.utilization)
         })
         .collect();
-    if tiers.is_empty() {
+    (!tiers.is_empty()).then(|| tiers.join(" · "))
+}
+
+/// 一个工具在托盘里的数
+struct ToolFigures<'a> {
+    tool: &'a str,
+    today_cost: f64,
+    month_cost: f64,
+    quota: Option<&'a SubscriptionQuota>,
+}
+
+/// 一个工具的一块：名字和方案、今天和本月的花费、额度窗口。两个工具各一块，不合计；
+/// 这个月没用过、也没登录的工具不占位置。
+fn tool_block(texts: &Texts, figures: &ToolFigures) -> Option<Vec<String>> {
+    let windows = figures.quota.and_then(|q| quota_windows_line(texts, q));
+    if figures.month_cost <= 0.0 && figures.today_cost <= 0.0 && windows.is_none() {
         return None;
     }
-    Some(format!("{name} · {}", tiers.join(" · ")))
+    let name = tool_display_name(figures.tool);
+    let plan = figures
+        .quota
+        .filter(|q| q.success)
+        .and_then(|q| q.plan.as_ref());
+    let mut lines = vec![match plan {
+        Some(plan) => format!("{name} · {}", plan.label),
+        None => name.to_string(),
+    }];
+    lines.push(format!(
+        "    {} {} · {} {}",
+        texts.today(),
+        format_usd(figures.today_cost),
+        texts.this_month(),
+        format_usd(figures.month_cost)
+    ));
+    if let Some(windows) = windows {
+        lines.push(format!("    {windows}"));
+    }
+    Some(lines)
 }
 
 // ─── 菜单 ────────────────────────────────────────────────────────────────────
 
 struct TraySummary {
-    today_lines: Vec<String>,
-    month_line: String,
-    quota_lines: Vec<String>,
+    /// 每个工具一块
+    blocks: Vec<Vec<String>>,
+    /// 预算按两个工具的合计设：超了单独一行
+    budget_lines: Vec<String>,
     tooltip: String,
 }
 
@@ -265,70 +280,75 @@ fn compute_summary(app: &AppHandle) -> TraySummary {
         .unwrap_or(today_start);
     let end = now.timestamp();
 
-    let by_app = state
+    let cost_of = |rows: &[crate::services::usage_stats::UsageSummaryByApp], tool: &str| {
+        rows.iter()
+            .find(|e| e.app_type == tool)
+            .and_then(|e| e.summary.total_cost.parse::<f64>().ok())
+            .unwrap_or(0.0)
+    };
+    let today_rows = state
         .db
         .get_usage_summary_by_app(Some(today_start), Some(end), None, None)
         .unwrap_or_default();
-    let mut today_cost = 0.0;
-    let mut today_tokens = 0u64;
-    let mut app_lines = Vec::new();
+    let month_rows = state
+        .db
+        .get_usage_summary_by_app(Some(month_start), Some(end), None, None)
+        .unwrap_or_default();
+
+    let mut blocks = Vec::new();
+    let mut tooltip_parts = Vec::new();
+    let mut today_total = 0.0;
     for tool in crate::services::alerts::TOOLS {
-        if let Some(entry) = by_app.iter().find(|e| e.app_type == tool) {
-            let cost = entry.summary.total_cost.parse::<f64>().unwrap_or(0.0);
-            today_cost += cost;
-            today_tokens += entry.summary.real_total_tokens;
-            app_lines.push(format!(
-                "    {}  {} · {}",
-                tool_display_name(tool),
-                format_usd(cost),
-                format_tokens(entry.summary.real_total_tokens)
-            ));
-        }
+        let today_cost = cost_of(&today_rows, tool);
+        today_total += today_cost;
+        tooltip_parts.push(format!(
+            "{} {}",
+            tool_display_name(tool),
+            format_usd(today_cost)
+        ));
+        let block = state.usage_cache.with_subscription(tool, |quota| {
+            tool_block(
+                &texts,
+                &ToolFigures {
+                    tool,
+                    today_cost,
+                    month_cost: cost_of(&month_rows, tool),
+                    quota: Some(quota),
+                },
+            )
+        });
+        let block = match block {
+            Some(block) => block,
+            None => tool_block(
+                &texts,
+                &ToolFigures {
+                    tool,
+                    today_cost,
+                    month_cost: cost_of(&month_rows, tool),
+                    quota: None,
+                },
+            ),
+        };
+        blocks.extend(block);
     }
 
     let settings = crate::settings::get_settings();
-    let mut today_line = if app_lines.is_empty() {
-        format!("{}  {}", texts.today(), texts.no_usage())
-    } else {
-        format!(
-            "{}  {} · {} tokens",
-            texts.today(),
-            format_usd(today_cost),
-            format_tokens(today_tokens)
-        )
-    };
-    if settings.daily_budget_usd.is_some_and(|b| today_cost >= b) {
-        today_line = format!("{today_line}  ⚠ {}", texts.over_budget());
+    let mut budget_lines = Vec::new();
+    if settings.daily_budget_usd.is_some_and(|b| today_total >= b) {
+        budget_lines.push(format!("⚠ {}", texts.budget_alert_title(false)));
     }
-    let mut today_lines = vec![today_line];
-    if app_lines.len() > 1 {
-        today_lines.extend(app_lines);
-    }
-
     let month_cost = state.db.total_cost_between(month_start, end).unwrap_or(0.0);
-    let mut month_line = format!("{}  {}", texts.this_month(), format_usd(month_cost));
     if settings.monthly_budget_usd.is_some_and(|b| month_cost >= b) {
-        month_line = format!("{month_line}  ⚠ {}", texts.over_budget());
+        budget_lines.push(format!("⚠ {}", texts.budget_alert_title(true)));
     }
-
-    let quota_lines = crate::services::alerts::TOOLS
-        .iter()
-        .filter_map(|tool| {
-            state
-                .usage_cache
-                .with_subscription(tool, |quota| format_quota_line(&texts, tool, quota))
-                .flatten()
-        })
-        .collect();
 
     TraySummary {
-        today_lines,
-        month_line,
-        quota_lines,
+        blocks,
+        budget_lines,
         tooltip: format!(
             "Pigger Switch · {} {}",
             texts.today(),
-            format_usd(today_cost)
+            tooltip_parts.join(" · ")
         ),
     }
 }
@@ -337,14 +357,21 @@ fn build_menu(app: &AppHandle, summary: &TraySummary) -> tauri::Result<Menu<Wry>
     let texts = texts();
     let info = |id: String, text: &str| MenuItem::with_id(app, id, text, false, None::<&str>);
     let mut builder = MenuBuilder::new(app);
-    for (index, line) in summary.today_lines.iter().enumerate() {
-        builder = builder.item(&info(format!("today_{index}"), line)?);
+    if summary.blocks.is_empty() {
+        builder = builder.item(&info("empty".to_string(), texts.no_usage())?);
     }
-    builder = builder.item(&info("month".to_string(), &summary.month_line)?);
-    if !summary.quota_lines.is_empty() {
+    for (block_index, block) in summary.blocks.iter().enumerate() {
+        if block_index > 0 {
+            builder = builder.item(&PredefinedMenuItem::separator(app)?);
+        }
+        for (index, line) in block.iter().enumerate() {
+            builder = builder.item(&info(format!("tool_{block_index}_{index}"), line)?);
+        }
+    }
+    if !summary.budget_lines.is_empty() {
         builder = builder.item(&PredefinedMenuItem::separator(app)?);
-        for (index, line) in summary.quota_lines.iter().enumerate() {
-            builder = builder.item(&info(format!("quota_{index}"), line)?);
+        for (index, line) in summary.budget_lines.iter().enumerate() {
+            builder = builder.item(&info(format!("budget_{index}"), line)?);
         }
     }
     builder
@@ -507,11 +534,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn formats_tokens_and_cost_compactly() {
-        assert_eq!(format_tokens(999), "999");
-        assert_eq!(format_tokens(12_345), "12.3K");
-        assert_eq!(format_tokens(3_200_000), "3.2M");
-        assert_eq!(format_tokens(1_500_000_000), "1.50B");
+    fn formats_cost_compactly() {
         assert_eq!(format_usd(1.234), "$1.23");
         assert_eq!(format_usd(123.4), "$123");
     }
@@ -520,15 +543,10 @@ mod tests {
     fn quota_line_lists_windows_and_hides_missing_logins() {
         let texts = Texts { lang: Lang::En };
         let mut quota = SubscriptionQuota::not_found("claude");
-        assert!(format_quota_line(&texts, "claude", &quota).is_none());
+        assert!(quota_windows_line(&texts, &quota).is_none());
 
         quota.success = true;
         quota.credential_status = crate::services::subscription::CredentialStatus::Valid;
-        quota.plan = Some(crate::services::subscription::SubscriptionPlan {
-            id: "max".to_string(),
-            label: "Max 5x".to_string(),
-            active_until: None,
-        });
         quota.tiers = vec![
             QuotaTier {
                 name: "five_hour".to_string(),
@@ -542,8 +560,55 @@ mod tests {
             },
         ];
         assert_eq!(
-            format_quota_line(&texts, "claude", &quota).as_deref(),
-            Some("Claude Max 5x · 5h 34% · 7d 12%")
+            quota_windows_line(&texts, &quota).as_deref(),
+            Some("5h 34% · 7d 12%")
         );
+    }
+
+    // 每个工具一块：名字和方案、它自己的今天和本月、它自己的窗口
+    #[test]
+    fn each_tool_gets_its_own_block() {
+        let texts = Texts { lang: Lang::En };
+        let mut quota = SubscriptionQuota::not_found("claude");
+        quota.success = true;
+        quota.credential_status = crate::services::subscription::CredentialStatus::Valid;
+        quota.plan = Some(crate::services::subscription::SubscriptionPlan {
+            id: "max".to_string(),
+            label: "Max 5x".to_string(),
+            active_until: None,
+        });
+        quota.tiers = vec![QuotaTier {
+            name: "five_hour".to_string(),
+            utilization: 16.0,
+            resets_at: None,
+        }];
+        let block = tool_block(
+            &texts,
+            &ToolFigures {
+                tool: "claude",
+                today_cost: 60.08,
+                month_cost: 1917.57,
+                quota: Some(&quota),
+            },
+        );
+        assert_eq!(
+            block,
+            Some(vec![
+                "Claude · Max 5x".to_string(),
+                "    Today $60.08 · This month $1918".to_string(),
+                "    5h 16%".to_string(),
+            ])
+        );
+        // 这个月没用过、也没登录：不占位置
+        let unused = tool_block(
+            &texts,
+            &ToolFigures {
+                tool: "codex",
+                today_cost: 0.0,
+                month_cost: 0.0,
+                quota: Some(&SubscriptionQuota::not_found("codex")),
+            },
+        );
+        assert_eq!(unused, None);
     }
 }

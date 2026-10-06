@@ -129,6 +129,9 @@ export function RequestLogTable({
   });
 
   const logs = result?.data ?? [];
+  // 每个工具的页只有这个工具的请求：只有混着两个工具时才要「应用」这一列
+  const showApp =
+    new Set(logs.map((log) => displayAppType(log.appType))).size > 1;
   const total = result?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
@@ -220,18 +223,20 @@ export function RequestLogTable({
             </span>
           )}
         </td>
-        <td className={cn(usageTable.td, "w-px")}>
-          <span
-            className="flex max-w-[88px] items-center gap-1.5"
-            title={appDisplayName(log.appType)}
-          >
-            {isKnownAppId(glyphApp) && <AppGlyph app={glyphApp} size={14} />}
-            <span className="truncate" aria-hidden="true">
-              {appShortName(log.appType)}
+        {showApp && (
+          <td className={cn(usageTable.td, "w-px")}>
+            <span
+              className="flex max-w-[88px] items-center gap-1.5"
+              title={appDisplayName(log.appType)}
+            >
+              {isKnownAppId(glyphApp) && <AppGlyph app={glyphApp} size={14} />}
+              <span className="truncate" aria-hidden="true">
+                {appShortName(log.appType)}
+              </span>
+              <span className="sr-only">{appDisplayName(log.appType)}</span>
             </span>
-            <span className="sr-only">{appDisplayName(log.appType)}</span>
-          </span>
-        </td>
+          </td>
+        )}
         {/* 项目、模型两列按比例取宽（max-w-0 让百分比宽度生效、内容截断）；
             比例合计 40%，再大就会把数值列挤到只剩内容宽度 */}
         <td className={cn(usageTable.td, "w-[18%] max-w-0")}>
@@ -316,7 +321,7 @@ export function RequestLogTable({
           <thead>
             <tr className={usageTable.headRow}>
               <th className={usageTable.th}>{t("usage.time")}</th>
-              <th className={usageTable.th}>{t("usage.app")}</th>
+              {showApp && <th className={usageTable.th}>{t("usage.app")}</th>}
               <th className={usageTable.th}>{t("usage.project")}</th>
               <th className={usageTable.th}>{t("usage.model")}</th>
               <th className={usageTable.thEnd}>{t("usage.freshInput")}</th>
@@ -336,7 +341,7 @@ export function RequestLogTable({
           <tbody>
             {logs.length === 0 ? (
               <tr>
-                <td colSpan={9} className={usageTable.empty}>
+                <td colSpan={showApp ? 9 : 8} className={usageTable.empty}>
                   {t("usage.noData")}
                 </td>
               </tr>

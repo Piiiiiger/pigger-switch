@@ -19,21 +19,13 @@ import { PageTabs } from "@/components/ui/page-tabs";
 import { Button } from "@/components/ui/button";
 import { HoverTip } from "@/components/ui/hover-tip";
 import {
-  SegmentThumb,
-  useSlidingIndicator,
-} from "@/components/ui/sliding-indicator";
-import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
-import {
-  KNOWN_APP_TYPES,
-  type AppTypeFilter,
-  type UsageRangeSelection,
-} from "@/types/usage";
+import type { AppType, UsageRangeSelection } from "@/types/usage";
 import {
   usageKeys,
   useModelStats,
@@ -51,7 +43,6 @@ import { ProjectStatsTable } from "./ProjectStatsTable";
 import { SessionStatsTable, sessionLabel } from "./SessionStatsTable";
 import { ActivityHeatmap } from "./ActivityHeatmap";
 import { ModelStatsTable } from "./ModelStatsTable";
-import { PricingConfigPanel } from "./PricingConfigPanel";
 import { RequestDetailPanel } from "./RequestDetailPanel";
 import { UsageDataSourcesSheet } from "./UsageDataSourcesSheet";
 import { UsageDateRangePicker } from "./UsageDateRangePicker";
@@ -63,7 +54,7 @@ import {
   exportUsageCsv,
   type CsvExportKind,
 } from "./exportCsv";
-import { LimitsStrip } from "@/components/limits/LimitsStrip";
+import { ToolLimitsStrip } from "@/components/limits/ToolLimitsStrip";
 import type { SessionStats } from "@/types/usage";
 
 const DEFAULT_REFRESH_INTERVAL_MS = 30000;
@@ -80,21 +71,8 @@ const normalizeRefreshInterval = (value: number | undefined) =>
 
 const STATUS_CODE_OPTIONS = [200, 400, 401, 429, 500] as const;
 
-type UsageTab =
-  | "logs"
-  | "projects"
-  | "sessions"
-  | "models"
-  | "activity"
-  | "pricing";
-const TABS: UsageTab[] = [
-  "logs",
-  "projects",
-  "sessions",
-  "models",
-  "activity",
-  "pricing",
-];
+type UsageTab = "logs" | "projects" | "sessions" | "models" | "activity";
+const TABS: UsageTab[] = ["logs", "projects", "sessions", "models", "activity"];
 
 /**
  * 手动「立即同步」的时间，离开页面再回来也还在。后端也会记下最近一次扫描（后台定时和
@@ -156,6 +134,8 @@ function MenuMeta({ children }: { children: React.ReactNode }) {
 }
 
 interface UsageDashboardProps {
+  /** 这一页只看这个工具；另一个工具有自己的页 */
+  tool: AppType;
   refreshIntervalMs?: number;
   onRefreshIntervalChange?: (next: number) => Promise<boolean> | boolean | void;
   sessionAutoSyncEnabled?: boolean;
@@ -166,26 +146,30 @@ interface UsageDashboardProps {
   onOpenLimits?: () => void;
   /** 「数据来源」里的「修改日志目录」：打开设置 */
   onOpenSettings?: () => void;
+  /** 空状态里「先配好价格」：打开价格页 */
+  onOpenPrices?: () => void;
 }
 
 /**
- * 用量统计页：页头 → 筛选行 → 额度条 → 指标 → 趋势图 →
- * 子页签（请求日志 / 项目 / 会话 / 模型 / 活跃时段 / 定价）。
+ * 一个工具的用量页：页头 → 筛选行 → 额度条 → 指标 → 趋势图 →
+ * 子页签（请求日志 / 项目 / 会话 / 模型 / 活跃时段）。
  */
 export function UsageDashboard({
+  tool,
   refreshIntervalMs: savedRefreshIntervalMs,
   onRefreshIntervalChange,
   sessionAutoSyncEnabled = true,
   onSessionAutoSyncEnabledChange,
   onOpenLimits,
   onOpenSettings,
-}: UsageDashboardProps = {}) {
+  onOpenPrices,
+}: UsageDashboardProps) {
   const { t, i18n } = useTranslation();
   const queryClient = useQueryClient();
   const [range, setRange] = useState<UsageRangeSelection>({
     preset: "today",
   });
-  const [appType, setAppType] = useState<AppTypeFilter>("all");
+  const appType = tool;
   const [project, setProject] = useState<string | undefined>(undefined);
   // 会话页点进来：请求日志只看这一个会话
   const [sessionFilter, setSessionFilter] = useState<SessionStats | null>(null);
@@ -193,8 +177,6 @@ export function UsageDashboard({
   const [model, setModel] = useState<string | undefined>(undefined);
   const [statusCode, setStatusCode] = useState<number | undefined>(undefined);
   const [tab, setTab] = useState<UsageTab>("logs");
-  // 没有用量时也能进定价页：新装的人往往先配好 models.dev 同步再开始用
-  const [pricingWhileEmpty, setPricingWhileEmpty] = useState(false);
   const [refreshIntervalMs, setRefreshIntervalMs] = useState(() =>
     normalizeRefreshInterval(savedRefreshIntervalMs),
   );
@@ -220,16 +202,7 @@ export function UsageDashboard({
     setRefreshIntervalMs(normalizeRefreshInterval(savedRefreshIntervalMs));
   }, [savedRefreshIntervalMs]);
 
-  // 切应用时清掉下游筛选，避免留下一个在新范围内查无数据的"幽灵"组合；
-  // 切项目同理清掉模型（模型选项随项目级联）。
-  const changeAppType = (next: AppTypeFilter) => {
-    setAppType(next);
-    if (next !== appType) {
-      setProject(undefined);
-      setModel(undefined);
-      setSessionFilter(null);
-    }
-  };
+  // 切项目时清掉模型（模型选项随项目级联）
   const changeProject = (next: string | undefined) => {
     setProject(next);
     if (next !== project) {
@@ -366,8 +339,8 @@ export function UsageDashboard({
   );
   // 有没有任何用量（不分时间范围）：一条都没有时显示空状态
   const { data: allTimeSummary } = useQuery({
-    queryKey: [...usageKeys.all, "all-time-summary"],
-    queryFn: () => usageApi.getUsageSummary(),
+    queryKey: [...usageKeys.all, "all-time-summary", tool],
+    queryFn: () => usageApi.getUsageSummary(undefined, undefined, tool),
     refetchInterval: refetch.refetchInterval,
   });
   const isEmpty = allTimeSummary != null && allTimeSummary.totalRequests === 0;
@@ -534,58 +507,8 @@ export function UsageDashboard({
   );
 
   // ── 筛选行 ───────────────────────────────────────────────────────────
-  // 选中块是单独的滑块（SegmentThumb），切换应用时滑过去
-  const appFilterIndicator = useSlidingIndicator<HTMLDivElement>(
-    '[aria-pressed="true"]',
-    appType,
-  );
-  const chipClass = (pressed: boolean) =>
-    cn(
-      "relative inline-flex h-[26px] shrink-0 items-center gap-1.5 whitespace-nowrap rounded-[5px] px-2 text-body transition-colors duration-150",
-      pressed
-        ? "font-semibold text-fg-1"
-        : "font-medium text-fg-2 hover:text-fg-1",
-    );
-
   const filterRow = (
     <div className="flex min-h-12 shrink-0 flex-wrap items-center gap-1.5 px-6 py-2">
-      <div
-        ref={appFilterIndicator.ref}
-        role="group"
-        aria-label={t("usage.appFilter.label")}
-        className="relative flex h-8 shrink-0 items-center gap-0.5 rounded-[8px] bg-subtle p-[3px]"
-      >
-        <SegmentThumb
-          rect={appFilterIndicator.rect}
-          animate={appFilterIndicator.animate}
-          className="rounded-[5px]"
-        />
-        <button
-          type="button"
-          aria-pressed={appType === "all"}
-          className={chipClass(appType === "all")}
-          onClick={() => changeAppType("all")}
-        >
-          {t("usage.appFilter.all")}
-        </button>
-        {/* 应用只露图标，名字放悬停提示和 aria-label */}
-        {KNOWN_APP_TYPES.map((app) => (
-          <HoverTip key={app} content={APP_DISPLAY_NAME[app]}>
-            <button
-              type="button"
-              aria-pressed={appType === app}
-              aria-label={APP_DISPLAY_NAME[app]}
-              className={cn(
-                chipClass(appType === app),
-                "w-[30px] justify-center px-0",
-              )}
-              onClick={() => changeAppType(app)}
-            >
-              <AppGlyph app={app} size={16} />
-            </button>
-          </HoverTip>
-        ))}
-      </div>
       <div className="min-w-2 flex-1" />
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
@@ -698,7 +621,6 @@ export function UsageDashboard({
     sessions: t("usage.tabs.sessions"),
     models: t("usage.tabs.models"),
     activity: t("usage.tabs.activity"),
-    pricing: t("usage.tabs.pricing"),
   };
   const statusLabel =
     statusCode == null
@@ -752,8 +674,6 @@ export function UsageDashboard({
         {tab === "sessions" ? t("usage.sessionsHint") : t("usage.sortedByCost")}
       </span>
     ) : null;
-
-  const scopedAppType = appType === "all" ? undefined : appType;
 
   const tabsSection = (
     <section aria-label={t("usage.tabs.label")} className="flex flex-col">
@@ -840,104 +760,97 @@ export function UsageDashboard({
             refreshIntervalMs={refreshIntervalMs}
           />
         )}
-        {tab === "pricing" && <PricingConfigPanel />}
       </div>
     </section>
   );
 
-  const body =
-    isEmpty && pricingWhileEmpty ? (
-      // 空库里只有定价可配：不画全是 0 的概览和趋势，直接给页签
-      <div
-        id="main-content"
-        className="flex min-h-0 flex-1 flex-col gap-3.5 overflow-y-auto scroll-stable px-6 pb-6 pt-1"
-      >
-        {tabsSection}
-      </div>
-    ) : isEmpty ? (
-      <div className="flex min-h-0 flex-1 flex-col items-center overflow-y-auto scroll-stable px-6 pb-6">
-        <div className="mt-16 flex max-w-[440px] flex-col items-center gap-3 text-center">
-          <span
-            aria-hidden="true"
-            className="flex h-11 w-11 items-center justify-center rounded-full bg-subtle text-fg-2"
-          >
-            <ChartColumn className="h-5 w-5" strokeWidth={1.5} />
-          </span>
-          <div className="flex flex-col gap-1">
-            <p className="m-0 text-section text-fg-1">
-              {t("usage.empty.title")}
-            </p>
-            <p className="m-0 text-body text-fg-2">{t("usage.empty.body")}</p>
-          </div>
-          <Button
-            type="button"
-            variant="neutral"
-            size="regular"
-            disabled={syncingSession}
-            onClick={() => void runManualSessionSync()}
-          >
-            {syncingSession && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-            {t("usage.sessionSync.syncNow")}
-          </Button>
+  const body = isEmpty ? (
+    <div className="flex min-h-0 flex-1 flex-col items-center overflow-y-auto scroll-stable px-6 pb-6">
+      <div className="mt-16 flex max-w-[440px] flex-col items-center gap-3 text-center">
+        <span
+          aria-hidden="true"
+          className="flex h-11 w-11 items-center justify-center rounded-full bg-subtle text-fg-2"
+        >
+          <ChartColumn className="h-5 w-5" strokeWidth={1.5} />
+        </span>
+        <div className="flex flex-col gap-1">
+          <p className="m-0 text-section text-fg-1">{t("usage.empty.title")}</p>
+          <p className="m-0 text-body text-fg-2">
+            {t("usage.empty.body", { app: APP_DISPLAY_NAME[tool] })}
+          </p>
+        </div>
+        <Button
+          type="button"
+          variant="neutral"
+          size="regular"
+          disabled={syncingSession}
+          onClick={() => void runManualSessionSync()}
+        >
+          {syncingSession && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+          {t("usage.sessionSync.syncNow")}
+        </Button>
+        {onOpenPrices && (
           <Button
             type="button"
             variant="quiet"
             size="regular"
-            onClick={() => {
-              setTab("pricing");
-              setPricingWhileEmpty(true);
-            }}
+            onClick={onOpenPrices}
           >
             {t("usage.empty.configurePricing")}
           </Button>
-        </div>
+        )}
       </div>
-    ) : (
-      <div
-        id="main-content"
-        className="flex min-h-0 flex-1 flex-col gap-3.5 overflow-y-auto scroll-stable px-6 pb-6 pt-1"
-      >
-        <LimitsStrip onOpenLimits={onOpenLimits} />
+    </div>
+  ) : (
+    <div
+      id="main-content"
+      className="flex min-h-0 flex-1 flex-col gap-3.5 overflow-y-auto scroll-stable px-6 pb-6 pt-1"
+    >
+      <ToolLimitsStrip tool={tool} onOpenLimits={onOpenLimits} />
 
-        <UsageHero
-          range={range}
-          appType={scopedAppType}
+      <UsageHero
+        range={range}
+        appType={tool}
+        project={project}
+        model={model}
+        refreshIntervalMs={refreshIntervalMs}
+        compact={compact}
+      />
+
+      {/* 「全部」看长期分布用热力图；24 小时到 30 天这类短范围用柱状图 */}
+      {range.preset === "all" ? (
+        <UsageHeatmap
+          appType={appType}
           project={project}
           model={model}
           refreshIntervalMs={refreshIntervalMs}
-          compact={compact}
         />
+      ) : (
+        <UsageTrendChart
+          range={range}
+          rangeLabel={rangeLabel}
+          appType={appType}
+          project={project}
+          model={model}
+          refreshIntervalMs={refreshIntervalMs}
+        />
+      )}
 
-        {/* 「全部」看长期分布用热力图；24 小时到 30 天这类短范围用柱状图 */}
-        {range.preset === "all" ? (
-          <UsageHeatmap
-            appType={appType}
-            project={project}
-            model={model}
-            refreshIntervalMs={refreshIntervalMs}
-          />
-        ) : (
-          <UsageTrendChart
-            range={range}
-            rangeLabel={rangeLabel}
-            appType={appType}
-            project={project}
-            model={model}
-            refreshIntervalMs={refreshIntervalMs}
-          />
-        )}
-
-        {tabsSection}
-      </div>
-    );
+      {tabsSection}
+    </div>
+  );
 
   return (
     <div ref={containerRef} className="flex min-h-0 min-w-0 flex-1 flex-col">
       <AppPageHeader
-        icon={<ChartColumn className="h-5 w-5" strokeWidth={1.5} />}
-        title={t("nav.usage")}
+        variant="app"
+        icon={<AppGlyph app={tool} size={20} />}
+        title={APP_DISPLAY_NAME[tool]}
+        subtitle={t("nav.usage")}
         titleExtra={
-          <HelpTip title={t("nav.usage")}>{t("usage.subtitle")}</HelpTip>
+          <HelpTip title={APP_DISPLAY_NAME[tool]}>
+            {t(`usage.subtitle.${tool}`)}
+          </HelpTip>
         }
         actions={headerActions}
       />
@@ -949,6 +862,7 @@ export function UsageDashboard({
         onClose={() => setDetailRequestId(null)}
       />
       <UsageDataSourcesSheet
+        tool={tool}
         open={sourcesOpen}
         onOpenChange={setSourcesOpen}
         sessionAutoSyncEnabled={sessionAutoSyncEnabled}
